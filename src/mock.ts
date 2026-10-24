@@ -5,7 +5,7 @@ const currentMonthDate = (day: number): string => {
   return new Date(now.getFullYear(), now.getMonth(), day, 12).toISOString();
 };
 
-export const initialAccount: AccountSummary = { id: 'acct_01', name: 'Everyday Checking', maskedNumber: '•••• 0987', balancePaise: 10000000, currency: 'INR' };
+export const initialAccount: AccountSummary = { id: 'acct_01', userId: 'usr_01', name: 'Everyday Checking', maskedNumber: '•••• 0987', balancePaise: 10000000, currency: 'INR' };
 export const ravi: Beneficiary = { id: 'ben_ravi', fullName: 'Ravi Sharma', alias: 'Ravi', dailyLimitPaise: 10000000 };
 export const initialTransactions: Transaction[] = [
   { id: 'txn_trattoria', merchant: 'Trattoria', category: 'Dining', amountPaise: 320000, date: currentMonthDate(3), status: 'successful', reference: 'HMS-2403-TRAT' },

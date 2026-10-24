@@ -14,6 +14,7 @@ export interface Transaction {
 
 export interface AccountSummary {
   id: string;
+  userId: string;
   name: string;
   maskedNumber: string;
   balancePaise: number;
@@ -33,7 +34,21 @@ export interface SpendingSummary {
   transactionCount: number;
 }
 
-export type ApprovalStatus = 'pending' | 'authorized' | 'cancelled' | 'declined' | 'failed' | 'expired';
+// Transfer approval lifecycle:
+// PREPARED -> WAITING_FOR_APPROVAL -> COMPLETED
+// Alternative outcomes: CANCELLED, REJECTED, EXPIRED, FAILED
+export type ApprovalStatus =
+  | 'PREPARED'
+  | 'WAITING_FOR_APPROVAL'
+  | 'COMPLETED'
+  | 'CANCELLED'
+  | 'REJECTED'
+  | 'EXPIRED'
+  | 'FAILED';
+
+// Back-compat aliases for legacy lowercase consumers.
+export type LegacyApprovalStatus = 'pending' | 'authorized' | 'cancelled' | 'declined' | 'failed' | 'expired';
+
 export interface TransferApproval {
   approvalId: string;
   beneficiary: Beneficiary;
@@ -43,6 +58,7 @@ export interface TransferApproval {
   projectedBalancePaise: number;
   expiresAt: string;
   status: ApprovalStatus;
+  consumed: boolean;
 }
 
 export interface TransferResult {
@@ -55,6 +71,7 @@ export interface AssistantResponse {
   kind: 'normal' | 'analysis' | 'history' | 'transfer_approval' | 'transfer_complete' | 'cancelled' | 'error';
   text: string;
   approval?: TransferApproval;
+  summary?: { spendingPaise: number; diningPaise: number; balancePaise: number; proposedTransferPaise: number; projectedBalancePaise: number };
 }
 
 export interface ChatMessage {
