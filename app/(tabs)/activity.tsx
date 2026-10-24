@@ -1,0 +1,11 @@
+import React, { useMemo, useState } from 'react';
+import { FlatList, StyleSheet, Text, View } from 'react-native';
+import { useApp } from '../../src/AppContext';
+import { colors, spacing } from '../../src/theme';
+import { Chip, Screen, SearchBox, TransactionRow } from '../../src/ui';
+import { TransactionCategory } from '../../src/models';
+import { router } from 'expo-router';
+
+const filters = ['All', 'Dining', 'Shopping', 'Utility', 'Transfer'] as const;
+export default function ActivityScreen() { const { transactions } = useApp(); const [filter, setFilter] = useState<typeof filters[number]>('All'); const [search, setSearch] = useState(''); const visible = useMemo(() => transactions.filter((item) => (filter === 'All' || item.category === filter) && `${item.merchant} ${item.reference}`.toLowerCase().includes(search.toLowerCase())), [transactions, filter, search]); return <Screen><Text style={styles.title}>Activity</Text><Text style={styles.subtitle}>Your simulated account activity</Text><SearchBox value={search} onChangeText={setSearch} placeholder="Search merchant or reference" /><View style={styles.chips}>{filters.map((item) => <Chip key={item} label={item} selected={filter === item} onPress={() => setFilter(item)} />)}</View>{visible.length ? <View style={styles.list}>{visible.map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} onPress={() => router.push({ pathname: '/transaction/[id]', params: { id: transaction.id } })} />)}</View> : <View style={styles.empty}><Text style={styles.emptyTitle}>No activity found</Text><Text style={styles.emptyText}>Try another category or search term.</Text></View>}</Screen>; }
+const styles = StyleSheet.create({ title: { color: colors.ink, fontSize: 28, fontWeight: '700', marginTop: 10 }, subtitle: { color: colors.muted, fontSize: 14, marginTop: 6, marginBottom: 20 }, chips: { flexDirection: 'row', marginTop: 16, marginBottom: 8 }, list: { backgroundColor: colors.surface, borderRadius: 16, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.line }, empty: { alignItems: 'center', paddingTop: 80 }, emptyTitle: { color: colors.ink, fontSize: 17, fontWeight: '700' }, emptyText: { color: colors.muted, marginTop: 8 } });

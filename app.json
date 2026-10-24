@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Hermes Personal Banking",
+    "slug": "hermes-personal-banking",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "hermesbank",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": { "supportsTablet": true },
+    "plugins": ["expo-router"]
+  }
+}
