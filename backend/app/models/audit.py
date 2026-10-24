@@ -1,7 +1,7 @@
 """Audit events and idempotency records."""
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -33,4 +33,7 @@ class IdempotencyRecord(Base):
     response_json = mapped_column(Text, nullable=True)
     created_at = mapped_column(String(40), nullable=False)
 
-    __table_args__ = (Index("ix_idem_key_user", "key", "user_id"),)
+    __table_args__ = (
+        Index("ix_idem_key_user", "key", "user_id"),
+        UniqueConstraint("key", "user_id", name="uq_idem_key_user"),
+    )

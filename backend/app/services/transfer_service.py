@@ -289,4 +289,5 @@ def _approval_to_dict(approval: TransferApproval, beneficiary, current_balance_p
         "expiresAt": approval.expires_at,
         "status": approval.status,
         "consumed": bool(consumed if consumed is not None else approval.status not in PENDING_STATES),
+        "idempotencyKey": approval.idempotency_key,
     }

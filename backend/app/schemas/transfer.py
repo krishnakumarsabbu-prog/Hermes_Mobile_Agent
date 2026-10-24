@@ -28,6 +28,7 @@ class TransferApprovalOut(BaseModel):
     expiresAt: str = Field(alias="expiresAt")
     status: str
     consumed: bool = False
+    idempotencyKey: Optional[str] = Field(default=None, alias="idempotencyKey")
 
 
 class TransferResultOut(BaseModel):

@@ -20,7 +20,12 @@ def chat(
     request_id: str = Depends(request_id_dep),
 ) -> dict:
     return assistant_service.handle_message(
-        session, user_id=user.user_id, message=body.message, conversation_id=body.conversationId, request_id=request_id
+        session,
+        user_id=user.user_id,
+        message=body.message,
+        conversation_id=body.conversationId,
+        request_id=request_id,
+        intent_id=body.intentId,
     )
 
 

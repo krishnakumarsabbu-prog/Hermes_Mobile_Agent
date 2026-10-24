@@ -16,6 +16,7 @@ class TransferApprovalOut(BaseModel):
     expiresAt: str = Field(alias="expiresAt")
     status: str
     consumed: bool = False
+    idempotencyKey: Optional[str] = Field(default=None, alias="idempotencyKey")
 
 
 class AssistantSummary(BaseModel):
@@ -35,6 +36,7 @@ class AssistantResponse(BaseModel):
         "transfer_complete",
         "cancelled",
         "error",
+        "clarification",
     ]
     text: str
     approval: Optional[TransferApprovalOut] = None
@@ -45,3 +47,4 @@ class AssistantResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
     conversationId: Optional[str] = None
+    intentId: Optional[str] = None

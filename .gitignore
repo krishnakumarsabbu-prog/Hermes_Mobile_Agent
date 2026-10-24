@@ -12,3 +12,13 @@ vitest.config.cjs.timestamp-*.mjs
 vitest.config.ts.timestamp-*.mjs
 vitest.config.mts.timestamp-*.mjs
 vitest.config.cts.timestamp-*.mjs
+
+# Python & Backend
+backend/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+backend/data/*.db
+*.sqlite3
+.pytest_cache/

@@ -5,13 +5,46 @@ import { AccountService as MockAccountService, TransactionService as MockTransac
 import { HttpAccountService, HttpTransactionService, HttpTransferService, HttpAssistantService } from './httpServices';
 import { AccountServiceContract, AssistantServiceContract, TransactionServiceContract, TransferServiceContract } from './serviceContracts';
 
-// Pick the active service implementations based on the configured API mode.
-// Mock services remain available for isolated UI development; when backend
-// mode is enabled the app talks to the FastAPI backend instead.
-const AccountService: AccountServiceContract = apiMode === 'http' ? HttpAccountService : MockAccountService;
-const TransactionService: TransactionServiceContract = apiMode === 'http' ? HttpTransactionService : MockTransactionService;
-const TransferService: TransferServiceContract = apiMode === 'http' ? HttpTransferService : MockTransferService;
-export const AssistantService: AssistantServiceContract = apiMode === 'http' ? HttpAssistantService : MockAssistantService;
+// Resilient service proxy: tries HTTP backend first, automatically falls back to Mock on network failure
+function withFallback<T extends object>(httpService: T, mockService: T): T {
+  const handler: ProxyHandler<T> = {
+    get(target, prop, receiver) {
+      const orig = Reflect.get(target, prop, receiver);
+      if (typeof orig === 'function') {
+        return async (...args: any[]) => {
+          try {
+            return await orig.apply(target, args);
+          } catch (err: any) {
+            if (
+              err?.code === 'NETWORK_FAILURE' ||
+              err?.code === 'NETWORK_TIMEOUT' ||
+              (typeof err?.message === 'string' && err.message.toLowerCase().includes('network')) ||
+              err?.status === 0
+            ) {
+              console.warn(`[API Fallback] Backend unreachable on ${String(prop)}, serving from mock.`);
+              const mockFn = (mockService as any)[prop];
+              if (typeof mockFn === 'function') {
+                return await mockFn.apply(mockService, args);
+              }
+            }
+            throw err;
+          }
+        };
+      }
+      return orig;
+    },
+  };
+  return new Proxy(httpService, handler);
+}
+
+const AccountService: AccountServiceContract =
+  apiMode === 'mock' ? MockAccountService : withFallback(HttpAccountService, MockAccountService);
+const TransactionService: TransactionServiceContract =
+  apiMode === 'mock' ? MockTransactionService : withFallback(HttpTransactionService, MockTransactionService);
+const TransferService: TransferServiceContract =
+  apiMode === 'mock' ? MockTransferService : withFallback(HttpTransferService, MockTransferService);
+export const AssistantService: AssistantServiceContract =
+  apiMode === 'mock' ? MockAssistantService : withFallback(HttpAssistantService, MockAssistantService);
 
 interface AppContextValue {
   account: AccountSummary;

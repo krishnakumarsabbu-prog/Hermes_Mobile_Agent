@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -27,11 +28,25 @@ import app.tools.beneficiary_tools  # noqa: F401
 import app.tools.transfer_tools  # noqa: F401
 
 
-_AMOUNT_RE = re.compile(r"(?:₹|rs\.?\s?|inr\s?)([\d,]+)", re.IGNORECASE)
+# Regex supporting currency symbols/prefixes (₹, Rs, Rs., INR), suffixes (rupees, rs, inr), or verbs (transfer/send/pay)
+_AMOUNT_RE = re.compile(
+    r"(?:(?:₹|rs\.?\s*|inr\s*)([0-9,]+(?:\.[0-9]+)?))|"
+    r"(?:([0-9,]+(?:\.[0-9]+)?)\s*(?:rupees|rs\.?|inr)\b)|"
+    r"(?:(?:transfer|send|pay)\s+(?:amount\s+of\s+)?([0-9,]+(?:\.[0-9]+)?)\b)",
+    re.IGNORECASE,
+)
 
 
-def handle_message(session: Session, *, user_id: str, message: str, conversation_id: Optional[str] = None, request_id: str = "") -> dict:
-    ctx = ToolContext(session=session, user_id=user_id, request_id=request_id)
+def handle_message(
+    session: Session,
+    *,
+    user_id: str,
+    message: str,
+    conversation_id: Optional[str] = None,
+    request_id: str = "",
+    intent_id: Optional[str] = None,
+) -> dict:
+    ctx = ToolContext(session=session, user_id=user_id, request_id=request_id, intent_id=intent_id or "")
     conversation = _ensure_conversation(session, user_id, conversation_id)
 
     user_msg = ConversationMessage(
@@ -144,6 +159,19 @@ def _orchestrate(ctx: ToolContext, message: str) -> dict:
     }
 
 
+def _resolve_proposal_idempotency_key(ctx: ToolContext) -> str:
+    """Generate or retrieve a unique idempotency key tied to this transfer proposal intent.
+
+    A retry of the same proposal (identified by intent_id or request_id) reuses the
+    same key, while a genuinely new transfer intent generates a fresh unique key.
+    """
+    if ctx.intent_id:
+        return ctx.intent_id if ctx.intent_id.startswith("agent-intent-") else f"agent-intent-{ctx.intent_id}"
+    if ctx.request_id:
+        return f"agent-intent-{ctx.request_id}"
+    return f"agent-intent-{uuid.uuid4().hex}"
+
+
 def _composite_spending_and_transfer(ctx: ToolContext, raw: str, normalized: str) -> dict:
     """Handle the canonical prompt:
 
@@ -155,15 +183,29 @@ def _composite_spending_and_transfer(ctx: ToolContext, raw: str, normalized: str
     balance_info = _run(ctx, "get_balance", {})
     balance = balance_info["balancePaise"]
 
-    name = _extract_beneficiary_name(normalized)
+    # Check for missing amount before calling resolve_beneficiary or prepare_transfer.
     amount_paise = _extract_amount(raw, normalized)
+    if amount_paise is None:
+        name = _extract_beneficiary_name(normalized)
+        target = f" to {name.title()}" if name else ""
+        return {
+            "kind": "clarification",
+            "text": (
+                f"Here is your monthly snapshot: you have spent {format_inr(spending['totalPaise'])} this month, "
+                f"including {format_inr(dining)} on dining. Your current balance is {format_inr(balance)}. "
+                f"How much would you like to transfer{target}?"
+            ),
+        }
 
+    name = _extract_beneficiary_name(normalized)
     try:
         beneficiary = _run(ctx, "resolve_beneficiary", {"name": name})
     except AppError as exc:
         return {"kind": "error", "text": exc.message}
 
     # Affordability + limit check happens inside prepare_transfer.
+    # Preserve separation: orchestration only prepares an approval; never authorizes.
+    idempotency_key = _resolve_proposal_idempotency_key(ctx)
     try:
         approval = _run(
             ctx,
@@ -171,7 +213,7 @@ def _composite_spending_and_transfer(ctx: ToolContext, raw: str, normalized: str
             {
                 "beneficiaryId": beneficiary["id"],
                 "amountPaise": amount_paise,
-                "idempotencyKey": f"agent-{ctx.user_id}-{amount_paise}-{beneficiary['id']}",
+                "idempotencyKey": idempotency_key,
             },
         )
     except AppError as exc:
@@ -205,12 +247,24 @@ def _affordability_text(spending: dict, dining: int, balance: int, amount_paise:
 
 
 def _transfer_intent(ctx: ToolContext, raw: str, normalized: str) -> dict:
-    name = _extract_beneficiary_name(normalized)
+    # Check for missing amount before calling resolve_beneficiary or prepare_transfer.
     amount_paise = _extract_amount(raw, normalized)
+    if amount_paise is None:
+        name = _extract_beneficiary_name(normalized)
+        target = f" to {name.title()}" if name else ""
+        return {
+            "kind": "clarification",
+            "text": f"How much would you like to transfer{target}?",
+        }
+
+    name = _extract_beneficiary_name(normalized)
     try:
         beneficiary = _run(ctx, "resolve_beneficiary", {"name": name})
     except AppError as exc:
         return {"kind": "error", "text": exc.message}
+
+    # Preserve separation: orchestration only prepares an approval; never authorizes.
+    idempotency_key = _resolve_proposal_idempotency_key(ctx)
     try:
         approval = _run(
             ctx,
@@ -218,7 +272,7 @@ def _transfer_intent(ctx: ToolContext, raw: str, normalized: str) -> dict:
             {
                 "beneficiaryId": beneficiary["id"],
                 "amountPaise": amount_paise,
-                "idempotencyKey": f"agent-{ctx.user_id}-{amount_paise}-{beneficiary['id']}",
+                "idempotencyKey": idempotency_key,
             },
         )
     except AppError as exc:
@@ -236,12 +290,41 @@ def _run(ctx: ToolContext, tool_name: str, args: dict) -> dict:
     return run_tool(tool_name, ctx, args)
 
 
-def _extract_amount(raw: str, normalized: str) -> int:
+def _extract_amount(raw: str, normalized: str) -> int | None:
+    """Strict monetary extraction and validation for INR transfers.
+
+    Supports integer or decimal rupee amounts (e.g. ₹75,000, 75000.50, rs. 500, 100 rupees).
+    Returns value in integer paise, or None if missing, invalid, non-positive, or
+    containing more than 2 decimal digits. Never defaults to a magic number.
+    """
     match = _AMOUNT_RE.search(raw)
-    if match:
-        rupees = int(match.group(1).replace(",", ""))
-        return rupees * 100
-    return 7500000  # default ₹75,000 for the canonical prompt
+    if not match:
+        match = _AMOUNT_RE.search(normalized)
+    if not match:
+        return None
+
+    val_str = match.group(1) or match.group(2) or (match.group(3) if len(match.groups()) >= 3 else None)
+    if not val_str:
+        return None
+
+    cleaned = val_str.replace(",", "").strip()
+    try:
+        d = Decimal(cleaned)
+    except InvalidOperation:
+        return None
+
+    # Amount must be strictly positive
+    if d <= 0:
+        return None
+
+    # Disallow fractions smaller than 1 paisa (more than 2 decimal places)
+    if d.as_tuple().exponent < -2:
+        return None
+
+    paise = int(round(d * 100))
+    if paise <= 0:
+        return None
+    return paise
 
 
 def _extract_beneficiary_name(normalized: str) -> str:

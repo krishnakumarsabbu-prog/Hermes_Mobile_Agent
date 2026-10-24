@@ -18,6 +18,7 @@ class ToolContext:
     session: Session
     user_id: str
     request_id: str = ""
+    intent_id: str = ""
 
 
 ToolFn = Callable[[ToolContext, Dict[str, Any]], Dict[str, Any]]

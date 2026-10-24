@@ -7,7 +7,7 @@ or amount after preparation.
 """
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -53,4 +53,5 @@ class TransferApproval(Base):
         CheckConstraint("amount_paise > 0", name="ck_approval_amount_positive"),
         Index("ix_approval_user_status", "user_id", "status"),
         Index("ix_approval_idem", "idempotency_key"),
+        UniqueConstraint("idempotency_key", "user_id", name="uq_approval_idem_user"),
     )
