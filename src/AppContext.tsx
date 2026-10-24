@@ -1,12 +1,25 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { AccountSummary, ChatMessage, Transaction, TransferApproval, TransferResult } from './models';
-import { AccountService, TransactionService, TransferService } from './services';
+import { apiMode } from './config';
+import { AccountService as MockAccountService, TransactionService as MockTransactionService, TransferService as MockTransferService, MockAssistantService } from './services';
+import { HttpAccountService, HttpTransactionService, HttpTransferService, HttpAssistantService } from './httpServices';
+import { AccountServiceContract, AssistantServiceContract, TransactionServiceContract, TransferServiceContract } from './serviceContracts';
+
+// Pick the active service implementations based on the configured API mode.
+// Mock services remain available for isolated UI development; when backend
+// mode is enabled the app talks to the FastAPI backend instead.
+const AccountService: AccountServiceContract = apiMode === 'http' ? HttpAccountService : MockAccountService;
+const TransactionService: TransactionServiceContract = apiMode === 'http' ? HttpTransactionService : MockTransactionService;
+const TransferService: TransferServiceContract = apiMode === 'http' ? HttpTransferService : MockTransferService;
+export const AssistantService: AssistantServiceContract = apiMode === 'http' ? HttpAssistantService : MockAssistantService;
 
 interface AppContextValue {
   account: AccountSummary;
   transactions: Transaction[];
   approval?: TransferApproval;
   transferResult?: TransferResult;
+  loading: boolean;
+  error?: string;
   refresh: () => Promise<void>;
   setApproval: (approval?: TransferApproval) => void;
   setTransferResult: (result?: TransferResult) => void;
@@ -22,11 +35,24 @@ export const AppProvider = ({ children }: React.PropsWithChildren) => {
   const [approval, setApproval] = useState<TransferApproval>();
   const [transferResult, setTransferResult] = useState<TransferResult>();
   const [authorizing, setAuthorizing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
 
   const refresh = async () => {
-    const [nextAccount, nextTransactions] = await Promise.all([AccountService.getAccountSummary(), TransactionService.listTransactions()]);
-    setAccount(nextAccount);
-    setTransactions(nextTransactions);
+    setLoading(true);
+    setError(undefined);
+    try {
+      const [nextAccount, nextTransactions] = await Promise.all([
+        AccountService.getAccountSummary(),
+        TransactionService.listTransactions(),
+      ]);
+      setAccount(nextAccount);
+      setTransactions(nextTransactions);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your account data. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -35,7 +61,6 @@ export const AppProvider = ({ children }: React.PropsWithChildren) => {
 
   const authorize = async (): Promise<TransferResult> => {
     if (!approval) throw new Error('No transfer is waiting for approval.');
-    // Guard against duplicate concurrent authorization attempts (repeated taps / callbacks).
     if (authorizing) throw new Error('Authorization is already in progress.');
     setAuthorizing(true);
     try {
@@ -43,13 +68,9 @@ export const AppProvider = ({ children }: React.PropsWithChildren) => {
       try {
         result = await TransferService.authorizeTransfer({ approvalId: approval.approvalId });
       } catch (error) {
-        // If the service returned an ambiguous error, do not blindly retry.
-        // Surface the status so the UI can show pending/unknown rather than
-        // falsely claiming success.
-        if (error instanceof Error && /already been used|expired|completed|cancelled/i.test(error.message)) {
+        if (error instanceof Error && /already been used|expired|completed|cancelled|no longer pending/i.test(error.message)) {
           throw error;
         }
-        // Ambiguous failure: check the actual approval status before claiming failure.
         try {
           const status = await TransferService.getTransferStatus(approval.approvalId);
           if (status.approval.status === 'COMPLETED' && status.transaction && status.updatedBalancePaise !== undefined) {
@@ -78,8 +99,8 @@ export const AppProvider = ({ children }: React.PropsWithChildren) => {
   };
 
   const value = useMemo<AppContextValue>(
-    () => ({ account, transactions, approval, transferResult, refresh, setApproval, setTransferResult, authorize, cancel }),
-    [account, transactions, approval, transferResult, authorizing],
+    () => ({ account, transactions, approval, transferResult, loading, error, refresh, setApproval, setTransferResult, authorize, cancel }),
+    [account, transactions, approval, transferResult, authorizing, loading, error],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
