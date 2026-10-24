@@ -1,7 +1,7 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { ArrowLeft, CheckCircle2 } from 'lucide-react-native';
+import { ArrowLeft, CircleCheck as CheckCircle2 } from 'lucide-react-native';
 import { useApp } from '../../src/AppContext';
 import { colors, radii } from '../../src/theme';
 import { formatDateTime, formatINR } from '../../src/utils';

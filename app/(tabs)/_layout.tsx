@@ -1,4 +1,4 @@
 import { Tabs } from 'expo-router';
-import { Home, List, Sparkles } from 'lucide-react-native';
+import { Dome as Home, List, Sparkles } from 'lucide-react-native';
 import { colors } from '../../src/theme';
 export default function TabsLayout() { return <Tabs screenOptions={{ headerShown: false, tabBarActiveTintColor: colors.red, tabBarInactiveTintColor: colors.muted, tabBarStyle: { height: 72, paddingTop: 8, borderTopColor: colors.line, backgroundColor: colors.surface }, tabBarLabelStyle: { fontSize: 11, fontWeight: '600' } }}><Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: ({ color }) => <Home color={color} size={21} /> }} /><Tabs.Screen name="activity" options={{ title: 'Activity', tabBarIcon: ({ color }) => <List color={color} size={21} /> }} /><Tabs.Screen name="assistant" options={{ title: 'Assistant', tabBarIcon: ({ color }) => <Sparkles color={color} size={21} /> }} /></Tabs>; }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { ChevronRight, CircleHelp, Search, Sparkles } from 'lucide-react-native';
+import { ChevronRight, Circle as CircleHelp, Search, Sparkles } from 'lucide-react-native';
 import { colors, radii, spacing } from './theme';
 import { formatDate, formatINR } from './utils';
 import { Transaction } from './models';
