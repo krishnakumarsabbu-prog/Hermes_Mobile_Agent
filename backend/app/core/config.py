@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     max_page_size: int = 100
     default_page_size: int = 20
 
+    # Hermes Agent Gateway integration. The Gateway base URL is only reachable
+    # from the machine hosting FastAPI (typically the same Windows machine that
+    # runs Hermes); the mobile app never calls it directly. Set
+    # HERMES_GATEWAY_ENABLED=false to fall back to the in-process orchestrator.
+    gateway_base_url: str = "http://127.0.0.1:8642"
+    gateway_model: str = "hermes-3"
+    gateway_enabled: bool = False
+    gateway_timeout_seconds: float = 30.0
+    # Maximum number of assistant round-trips allowed while Hermes iterates on
+    # tool calls before producing a final answer. Guards against runaway loops.
+    gateway_max_iterations: int = 8
+
     @property
     def db_url(self) -> str:
         path = Path(self.db_path)

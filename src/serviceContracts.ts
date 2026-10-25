@@ -34,7 +34,7 @@ export interface TransactionServiceContract {
 }
 
 export interface AssistantServiceContract {
-  sendMessage(message: string): Promise<AssistantResponse>;
+  sendMessage(message: string, conversationId?: string): Promise<AssistantResponse>;
 }
 
 export interface TransferServiceContract {

@@ -43,8 +43,11 @@ const TransactionService: TransactionServiceContract =
   apiMode === 'mock' ? MockTransactionService : withFallback(HttpTransactionService, MockTransactionService);
 const TransferService: TransferServiceContract =
   apiMode === 'mock' ? MockTransferService : withFallback(HttpTransferService, MockTransferService);
+// The assistant never silently falls back to mock banking data in http mode:
+// mock responses fabricate balances and transfers, which is unsafe for a
+// banking assistant. Network failures surface as real errors with a retry.
 export const AssistantService: AssistantServiceContract =
-  apiMode === 'mock' ? MockAssistantService : withFallback(HttpAssistantService, MockAssistantService);
+  apiMode === 'mock' ? MockAssistantService : HttpAssistantService;
 
 interface AppContextValue {
   account: AccountSummary;

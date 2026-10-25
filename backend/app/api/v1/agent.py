@@ -13,13 +13,13 @@ router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
 
 @router.post("/chat")
-def chat(
+async def chat(
     body: ChatRequest,
     session: Session = Depends(db_session),
     user: AuthPrincipal = Depends(principal),
     request_id: str = Depends(request_id_dep),
 ) -> dict:
-    return assistant_service.handle_message(
+    return await assistant_service.handle_message(
         session,
         user_id=user.user_id,
         message=body.message,

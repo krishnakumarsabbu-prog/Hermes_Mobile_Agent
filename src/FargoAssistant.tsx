@@ -33,6 +33,7 @@ import {
 } from 'lucide-react-native';
 import { useApp, useChat, AssistantService } from './AppContext';
 import { ChatMessage } from './models';
+import { isApiError } from './apiClient';
 
 interface FargoAssistantProps {
   onClose?: () => void;
@@ -43,6 +44,9 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
   const [messages, setMessages] = useChat();
   const [text, setText] = useState('');
   const [processing, setProcessing] = useState(false);
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [lastFailedPrompt, setLastFailedPrompt] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);
@@ -50,7 +54,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
   const [voiceModeTranscript, setVoiceModeTranscript] = useState('');
 
   const scroll = useRef<any>(null);
-  const { setApproval, account } = useApp();
+  const { setApproval } = useApp();
 
   // Waveform animations for Voice Mode and Mic recording
   const waveAnim1 = useRef(new Animated.Value(0.3)).current;
@@ -104,6 +108,8 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
     if (!message || processing) return;
     setText('');
     setIsListening(false);
+    setLastError(null);
+    setLastFailedPrompt(null);
     setVoiceModeStatus('thinking');
 
     setMessages((current) => [
@@ -113,45 +119,10 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
     setProcessing(true);
 
     try {
-      let response;
-      try {
-        response = await AssistantService.sendMessage(message);
-      } catch (err: any) {
-        console.warn('[Fargo AI] Service returned error, using local response:', err);
-        // Fallback local smart response so Fargo never fails
-        const lower = message.toLowerCase();
-        if (lower.includes('balance') || lower.includes('checking')) {
-          response = {
-            kind: 'normal' as const,
-            text: 'Your Everyday Checking balance is $2,667.93, and your Way2Save savings balance is $1,636.85.',
-          };
-        } else if (lower.includes('dining') || lower.includes('spend')) {
-          response = {
-            kind: 'analysis' as const,
-            text: 'You have spent $2,120.00 this month, with $640.00 (30%) on dining across 2 transactions.',
-          };
-        } else if (lower.includes('transfer')) {
-          response = {
-            kind: 'transfer_approval' as const,
-            text: 'I have prepared a simulated transfer of $150.00 to Sarah Jenkins. Please review the details below.',
-            approval: {
-              approvalId: `appr_${Date.now()}`,
-              beneficiary: { id: 'b1', fullName: 'Sarah Jenkins', alias: 'Sarah', dailyLimitPaise: 5000000 },
-              amountPaise: 15000,
-              sourceAccountId: account?.id || 'acc_default',
-              currentBalancePaise: account?.balancePaise || 266793,
-              projectedBalancePaise: (account?.balancePaise || 266793) - 15000,
-              expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-              status: 'WAITING_FOR_APPROVAL' as const,
-              consumed: false,
-            },
-          };
-        } else {
-          response = {
-            kind: 'normal' as const,
-            text: `I received your message: "${message}". I can help check balances, review spending by category, or prepare a transfer.`,
-          };
-        }
+      const response = await AssistantService.sendMessage(message, conversationId);
+
+      if (response.conversationId) {
+        setConversationId(response.conversationId);
       }
 
       const assistantMessage: ChatMessage = {
@@ -172,11 +143,30 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
         setVoiceModeTranscript(response.text);
         speakText(response.text, assistantMessage.id);
       }
-    } catch (criticalErr) {
-      console.error('[Fargo AI] Unexpected error:', criticalErr);
+    } catch (err) {
+      const friendly = isApiError(err)
+        ? err.message
+        : 'I could not reach the assistant right now. Please check your connection and try again.';
+      setLastError(friendly);
+      setLastFailedPrompt(message);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `err_${Date.now()}`,
+          role: 'assistant',
+          text: friendly,
+          response: { kind: 'error', text: friendly },
+        },
+      ]);
     } finally {
       setProcessing(false);
       setTimeout(() => scroll.current?.scrollToEnd({ animated: true }), 120);
+    }
+  };
+
+  const retryLast = () => {
+    if (lastFailedPrompt && !processing) {
+      void send(lastFailedPrompt);
     }
   };
 
@@ -308,6 +298,9 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
   };
 
   const handleResetChat = () => {
+    setConversationId(undefined);
+    setLastError(null);
+    setLastFailedPrompt(null);
     setMessages([
       {
         id: 'welcome',
@@ -574,6 +567,17 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
               <ActivityIndicator color="#582C83" size="small" />
               <Text style={styles.typingText}>Fargo is thinking...</Text>
             </View>
+          </View>
+        )}
+
+        {/* Retry banner when the last request failed */}
+        {lastError && !processing && lastFailedPrompt && (
+          <View style={styles.retryBanner}>
+            <Text style={styles.retryText}>{lastError}</Text>
+            <Pressable onPress={retryLast} style={styles.retryBtn}>
+              <RotateCcw size={14} color="#582C83" />
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </Pressable>
           </View>
         )}
       </ScrollView>
@@ -1118,6 +1122,41 @@ const styles = StyleSheet.create({
   typingText: {
     fontSize: 13,
     color: '#666666',
+  },
+
+  // Retry banner
+  retryBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  retryText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#B91C1C',
+  },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#582C83',
+  },
+  retryBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#582C83',
   },
 
   // Chips

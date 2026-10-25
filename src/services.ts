@@ -131,7 +131,7 @@ export const TransferService: TransferServiceContract = {
 };
 
 export const MockAssistantService: AssistantServiceContract = {
-  sendMessage: async (message: string): Promise<AssistantResponse> => {
+  sendMessage: async (message: string, _conversationId?: string): Promise<AssistantResponse> => {
     const normalized = message.toLowerCase();
     const summary = await getSummary();
 

@@ -73,6 +73,7 @@ export interface AssistantResponse {
   text: string;
   approval?: TransferApproval;
   summary?: { spendingPaise: number; diningPaise: number; balancePaise: number; proposedTransferPaise: number; projectedBalancePaise: number };
+  conversationId?: string;
 }
 
 export interface ChatMessage {

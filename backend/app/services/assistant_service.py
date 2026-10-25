@@ -1,9 +1,20 @@
 """Assistant orchestration service.
 
-Phase 2 uses a deterministic, rule-based orchestrator that calls registered
-backend tools and real database results. It never invents balances or spending
-amounts. The interface is designed so a real Hermes runtime can implement it
-later.
+The chat flow is:
+
+1. Resolve or create the persisted conversation (per-user isolation).
+2. Append the user message.
+3. Ask the real Hermes Agent Gateway (when enabled) to answer. Hermes uses
+   its registered personal-banking MCP skills/tools; when it returns tool
+   calls we execute them locally against the same backend tools the
+   orchestrator uses, sharing the request session so every number is
+   grounded in real database results and writes are atomic.
+4. If Hermes is unavailable, disabled, or returns an error, fall back to the
+   deterministic in-process orchestrator so the app keeps working offline.
+5. Persist the assistant message and return a normalized response.
+
+The orchestrator path (step 4) is preserved verbatim from the previous
+implementation; it calls the same backend tools and never invents balances.
 """
 from __future__ import annotations
 
@@ -11,13 +22,17 @@ import json
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError
+from app.core.logging import get_logger
 from app.models.conversation import Conversation, ConversationMessage
+from app.services import hermes_client
 from app.services.money import format_inr, now_utc_iso
+from app.services.tool_bridge import execute_tool_for_hermes
 from app.tools.registry import ToolContext
 
 # Importing these modules registers all tools.
@@ -26,6 +41,8 @@ import app.tools.spending_tools  # noqa: F401
 import app.tools.transaction_tools  # noqa: F401
 import app.tools.beneficiary_tools  # noqa: F401
 import app.tools.transfer_tools  # noqa: F401
+
+logger = get_logger("assistant.service")
 
 
 # Regex supporting currency symbols/prefixes (₹, Rs, Rs., INR), suffixes (rupees, rs, inr), or verbs (transfer/send/pay)
@@ -37,7 +54,7 @@ _AMOUNT_RE = re.compile(
 )
 
 
-def handle_message(
+async def handle_message(
     session: Session,
     *,
     user_id: str,
@@ -59,7 +76,19 @@ def handle_message(
     session.add(user_msg)
     session.flush()
 
-    response = _orchestrate(ctx, message)
+    settings = get_settings()
+    response: dict
+    if settings.gateway_enabled:
+        response = await _hermes_response(
+            session=session,
+            ctx=ctx,
+            conversation=conversation,
+            user_message=message,
+            user_id=user_id,
+            request_id=request_id,
+        )
+    else:
+        response = _orchestrate(ctx, message)
 
     assistant_msg = ConversationMessage(
         id=f"msg_{uuid.uuid4().hex[:16]}",
@@ -101,6 +130,89 @@ def get_conversation(session: Session, *, user_id: str, conversation_id: str) ->
     }
 
 
+async def _hermes_response(
+    *,
+    session: Session,
+    ctx: ToolContext,
+    conversation: Conversation,
+    user_message: str,
+    user_id: str,
+    request_id: str,
+) -> dict:
+    """Ask Hermes for a grounded answer, falling back to the orchestrator.
+
+    Tool calls are executed in the request session via the injected executor,
+    so writes share the request transaction and results are grounded. The most
+    recent ``prepare_transfer`` result is captured as the approval dict; the
+    model's prose is never the source of truth for transfer state.
+    """
+    history = _conversation_for_hermes(conversation, latest_user=user_message)
+    messages = [{"role": "system", "content": hermes_client.system_prompt(user_id=user_id)}] + history
+
+    prepared_approvals: list[dict[str, Any]] = []
+
+    async def tool_executor(call: dict[str, Any], _call_id: str) -> dict[str, Any]:
+        result = execute_tool_for_hermes(
+            tool_name=call["name"],
+            args=call.get("args") or {},
+            user_id=user_id,
+            request_id=request_id,
+            session=session,
+        )
+        if call["name"] == "prepare_transfer":
+            prepared_approvals.append(result)
+        return result
+
+    try:
+        result = await hermes_client.chat(
+            messages=messages,
+            conversation_id=conversation.id,
+            request_id=request_id,
+            user_id=user_id,
+            tool_executor=tool_executor,
+        )
+    except hermes_client.HermesError as exc:
+        logger.warning('{"event":"hermes.fallback","requestId":"%s","code":"%s"}', request_id, exc.code)
+        response = _orchestrate(ctx, user_message)
+        response["text"] = (
+            f"{response['text']}\n\n(I reached this using the offline assistant because {exc.message.lower()})"
+        )
+        return response
+
+    text = (result.content or "").strip()
+    if not text:
+        response = _orchestrate(ctx, user_message)
+        response["text"] = (
+            f"{response['text']}\n\n(The assistant returned tool results without a summary; "
+            "showing the grounded offline view.)"
+        )
+        return response
+
+    approval = prepared_approvals[-1] if prepared_approvals else None
+    return {
+        "kind": "transfer_approval" if approval else "normal",
+        "text": text,
+        "approval": approval,
+    }
+
+
+def _conversation_for_hermes(conversation: Conversation, *, latest_user: str) -> list[dict]:
+    """Build user/assistant message history for Hermes from the conversation.
+
+    Tool messages and raw tool output are dropped to avoid leaking internal
+    payloads and to keep the history compact.
+    """
+    history: list[dict] = []
+    for m in sorted(conversation.messages, key=lambda x: x.created_at):
+        if m.role == "user":
+            history.append({"role": "user", "content": m.text})
+        elif m.role == "assistant":
+            history.append({"role": "assistant", "content": m.text})
+    if not history or history[-1].get("content") != latest_user:
+        history.append({"role": "user", "content": latest_user})
+    return history
+
+
 def _ensure_conversation(session: Session, user_id: str, conversation_id: Optional[str]) -> Conversation:
     if conversation_id:
         conv = session.get(Conversation, conversation_id)
@@ -123,7 +235,6 @@ def _ensure_conversation(session: Session, user_id: str, conversation_id: Option
 def _orchestrate(ctx: ToolContext, message: str) -> dict:
     normalized = message.lower()
 
-    # Composite intent: spending + dining + conditional transfer to <name>.
     if ("spending" in normalized or "spent" in normalized) and "transfer" in normalized:
         return _composite_spending_and_transfer(ctx, message, normalized)
 
@@ -133,10 +244,7 @@ def _orchestrate(ctx: ToolContext, message: str) -> dict:
     if "dining" in normalized:
         spending = _run(ctx, "get_monthly_spending", {})
         dining = spending["byCategory"].get("Dining", 0)
-        return {
-            "kind": "analysis",
-            "text": f"You spent {format_inr(dining)} on dining this month.",
-        }
+        return {"kind": "analysis", "text": f"You spent {format_inr(dining)} on dining this month."}
 
     if "spending" in normalized or "month" in normalized or "spent" in normalized:
         spending = _run(ctx, "get_monthly_spending", {})
@@ -160,11 +268,6 @@ def _orchestrate(ctx: ToolContext, message: str) -> dict:
 
 
 def _resolve_proposal_idempotency_key(ctx: ToolContext) -> str:
-    """Generate or retrieve a unique idempotency key tied to this transfer proposal intent.
-
-    A retry of the same proposal (identified by intent_id or request_id) reuses the
-    same key, while a genuinely new transfer intent generates a fresh unique key.
-    """
     if ctx.intent_id:
         return ctx.intent_id if ctx.intent_id.startswith("agent-intent-") else f"agent-intent-{ctx.intent_id}"
     if ctx.request_id:
@@ -173,17 +276,11 @@ def _resolve_proposal_idempotency_key(ctx: ToolContext) -> str:
 
 
 def _composite_spending_and_transfer(ctx: ToolContext, raw: str, normalized: str) -> dict:
-    """Handle the canonical prompt:
-
-    'Show me my spending for this month, tell me how much I spent on dining,
-    and transfer ₹75,000 to Ravi if I can afford it.'
-    """
     spending = _run(ctx, "get_monthly_spending", {})
     dining = spending["byCategory"].get("Dining", 0)
     balance_info = _run(ctx, "get_balance", {})
     balance = balance_info["balancePaise"]
 
-    # Check for missing amount before calling resolve_beneficiary or prepare_transfer.
     amount_paise = _extract_amount(raw, normalized)
     if amount_paise is None:
         name = _extract_beneficiary_name(normalized)
@@ -203,24 +300,15 @@ def _composite_spending_and_transfer(ctx: ToolContext, raw: str, normalized: str
     except AppError as exc:
         return {"kind": "error", "text": exc.message}
 
-    # Affordability + limit check happens inside prepare_transfer.
-    # Preserve separation: orchestration only prepares an approval; never authorizes.
     idempotency_key = _resolve_proposal_idempotency_key(ctx)
     try:
         approval = _run(
             ctx,
             "prepare_transfer",
-            {
-                "beneficiaryId": beneficiary["id"],
-                "amountPaise": amount_paise,
-                "idempotencyKey": idempotency_key,
-            },
+            {"beneficiaryId": beneficiary["id"], "amountPaise": amount_paise, "idempotencyKey": idempotency_key},
         )
     except AppError as exc:
-        return {
-            "kind": "error",
-            "text": _affordability_text(spending, dining, balance, amount_paise, exc.message),
-        }
+        return {"kind": "error", "text": _affordability_text(spending, dining, balance, amount_paise, exc.message)}
 
     summary = {
         "spendingPaise": spending["totalPaise"],
@@ -247,15 +335,11 @@ def _affordability_text(spending: dict, dining: int, balance: int, amount_paise:
 
 
 def _transfer_intent(ctx: ToolContext, raw: str, normalized: str) -> dict:
-    # Check for missing amount before calling resolve_beneficiary or prepare_transfer.
     amount_paise = _extract_amount(raw, normalized)
     if amount_paise is None:
         name = _extract_beneficiary_name(normalized)
         target = f" to {name.title()}" if name else ""
-        return {
-            "kind": "clarification",
-            "text": f"How much would you like to transfer{target}?",
-        }
+        return {"kind": "clarification", "text": f"How much would you like to transfer{target}?"}
 
     name = _extract_beneficiary_name(normalized)
     try:
@@ -263,17 +347,12 @@ def _transfer_intent(ctx: ToolContext, raw: str, normalized: str) -> dict:
     except AppError as exc:
         return {"kind": "error", "text": exc.message}
 
-    # Preserve separation: orchestration only prepares an approval; never authorizes.
     idempotency_key = _resolve_proposal_idempotency_key(ctx)
     try:
         approval = _run(
             ctx,
             "prepare_transfer",
-            {
-                "beneficiaryId": beneficiary["id"],
-                "amountPaise": amount_paise,
-                "idempotencyKey": idempotency_key,
-            },
+            {"beneficiaryId": beneficiary["id"], "amountPaise": amount_paise, "idempotencyKey": idempotency_key},
         )
     except AppError as exc:
         return {"kind": "error", "text": exc.message}
@@ -291,12 +370,6 @@ def _run(ctx: ToolContext, tool_name: str, args: dict) -> dict:
 
 
 def _extract_amount(raw: str, normalized: str) -> int | None:
-    """Strict monetary extraction and validation for INR transfers.
-
-    Supports integer or decimal rupee amounts (e.g. ₹75,000, 75000.50, rs. 500, 100 rupees).
-    Returns value in integer paise, or None if missing, invalid, non-positive, or
-    containing more than 2 decimal digits. Never defaults to a magic number.
-    """
     match = _AMOUNT_RE.search(raw)
     if not match:
         match = _AMOUNT_RE.search(normalized)
@@ -313,11 +386,8 @@ def _extract_amount(raw: str, normalized: str) -> int | None:
     except InvalidOperation:
         return None
 
-    # Amount must be strictly positive
     if d <= 0:
         return None
-
-    # Disallow fractions smaller than 1 paisa (more than 2 decimal places)
     if d.as_tuple().exponent < -2:
         return None
 
@@ -328,7 +398,6 @@ def _extract_amount(raw: str, normalized: str) -> int | None:
 
 
 def _extract_beneficiary_name(normalized: str) -> str:
-    # Simple keyword extraction: "to <name>".
     match = re.search(r"\bto\s+([a-z]+)", normalized)
     if match:
         return match.group(1)

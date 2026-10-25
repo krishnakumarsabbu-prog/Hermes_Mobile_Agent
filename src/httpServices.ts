@@ -99,13 +99,14 @@ export const HttpTransactionService: TransactionServiceContract = {
 // --- HTTP Assistant Service ---
 
 export const HttpAssistantService: AssistantServiceContract = {
-  sendMessage: async (message: string): Promise<AssistantResponse> => {
-    const raw = await api.post<Record<string, unknown>>('/api/v1/agent/chat', { message });
+  sendMessage: async (message: string, conversationId?: string): Promise<AssistantResponse> => {
+    const raw = await api.post<Record<string, unknown>>('/api/v1/agent/chat', { message, conversationId });
     return {
       kind: raw.kind as AssistantResponse['kind'],
       text: raw.text as string,
       approval: raw.approval ? mapApproval(raw.approval as Record<string, unknown>) : undefined,
       summary: raw.summary as AssistantResponse['summary'] | undefined,
+      conversationId: raw.conversationId as string | undefined,
     };
   },
 };
