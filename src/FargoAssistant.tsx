@@ -4,6 +4,7 @@ import {
   Animated,
   Dimensions,
   Easing,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -31,9 +32,10 @@ import {
   X,
   Zap,
 } from 'lucide-react-native';
-import { useApp, useChat, AssistantService } from './AppContext';
-import { ChatMessage } from './models';
+import { useApp, useChat, AssistantService, getGreetingMessage } from './AppContext';
+import { ChatMessage, TransferApproval, ApprovalStatus } from './models';
 import { isApiError } from './apiClient';
+import { ChatMarkdown } from './ChatMarkdown';
 
 interface FargoAssistantProps {
   onClose?: () => void;
@@ -52,6 +54,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);
   const [voiceModeStatus, setVoiceModeStatus] = useState<'listening' | 'thinking' | 'speaking'>('listening');
   const [voiceModeTranscript, setVoiceModeTranscript] = useState('');
+  const [confirmingApprovalId, setConfirmingApprovalId] = useState<string | null>(null);
 
   const scroll = useRef<any>(null);
   const { setApproval } = useApp();
@@ -102,6 +105,29 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
     return () => loop?.stop();
   }, [isListening, speakingMessageId, voiceModeOpen]);
 
+  const scrollToBottom = (animated = true) => {
+    scroll.current?.scrollToEnd({ animated });
+  };
+
+  // Auto-scroll whenever messages list or processing state changes
+  useEffect(() => {
+    const t1 = setTimeout(() => scrollToBottom(true), 50);
+    const t2 = setTimeout(() => scrollToBottom(true), 200);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [messages.length, processing]);
+
+  // Auto-scroll when software keyboard slides up on mobile
+  useEffect(() => {
+    const eventName = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const sub = Keyboard.addListener(eventName, () => {
+      setTimeout(() => scrollToBottom(true), 80);
+    });
+    return () => sub.remove();
+  }, []);
+
   // Send message handler
   const send = async (value = text) => {
     const message = value.trim();
@@ -117,6 +143,8 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
       { id: `u_${Date.now()}`, role: 'user', text: message },
     ]);
     setProcessing(true);
+    setTimeout(() => scrollToBottom(true), 50);
+    setTimeout(() => scrollToBottom(true), 150);
 
     try {
       const response = await AssistantService.sendMessage(message, conversationId);
@@ -132,6 +160,8 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
         response,
       };
       setMessages((current) => [...current, assistantMessage]);
+      setTimeout(() => scrollToBottom(true), 60);
+      setTimeout(() => scrollToBottom(true), 180);
 
       if (response.approval) {
         setApproval(response.approval);
@@ -160,7 +190,103 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
       ]);
     } finally {
       setProcessing(false);
-      setTimeout(() => scroll.current?.scrollToEnd({ animated: true }), 120);
+      setTimeout(() => scrollToBottom(true), 80);
+      setTimeout(() => scrollToBottom(true), 250);
+    }
+  };
+
+  // Handle in-chat transfer confirmation without navigating away
+  const handleConfirmTransfer = async (targetApproval: TransferApproval) => {
+    if (confirmingApprovalId || processing || targetApproval.consumed || targetApproval.status === 'COMPLETED') {
+      return;
+    }
+    setConfirmingApprovalId(targetApproval.approvalId);
+    setProcessing(true);
+    setLastError(null);
+
+    const amountFormatted = `₹${(targetApproval.amountPaise / 100).toFixed(2)}`;
+    const confirmMessage = `Confirm transfer of ${amountFormatted} to ${targetApproval.beneficiary.fullName}`;
+
+    // Add user confirmation message into current conversation
+    setMessages((current) => [
+      ...current,
+      { id: `u_${Date.now()}`, role: 'user', text: confirmMessage },
+    ]);
+    setTimeout(() => scrollToBottom(true), 50);
+
+    try {
+      const response = await AssistantService.sendMessage(
+        confirmMessage,
+        conversationId,
+        {
+          type: 'confirm_transfer',
+          approvalId: targetApproval.approvalId,
+        }
+      );
+
+      if (response.conversationId) {
+        setConversationId(response.conversationId);
+      }
+
+      // Mark the original approval as completed and consumed in the messages list
+      setMessages((current) =>
+        current.map((msg): ChatMessage => {
+          if (msg.response?.approval?.approvalId === targetApproval.approvalId && msg.response) {
+            return {
+              ...msg,
+              response: {
+                ...msg.response,
+                approval: {
+                  ...msg.response.approval,
+                  ...(response.approval || {}),
+                  consumed: true,
+                  status: (response.approval?.status || 'COMPLETED') as ApprovalStatus,
+                },
+              },
+            };
+          }
+          return msg;
+        })
+      );
+
+      if (response.approval) {
+        setApproval(response.approval);
+      }
+
+      const assistantMessage: ChatMessage = {
+        id: `a_${Date.now()}`,
+        role: 'assistant',
+        text: response.text,
+        response,
+      };
+      setMessages((current) => [...current, assistantMessage]);
+      setTimeout(() => scrollToBottom(true), 60);
+
+      // If in Voice Mode, speak response aloud
+      if (voiceModeOpen || isListening) {
+        setVoiceModeStatus('speaking');
+        setVoiceModeTranscript(response.text);
+        speakText(response.text, assistantMessage.id);
+      }
+    } catch (err) {
+      const friendly = isApiError(err)
+        ? err.message
+        : 'I could not confirm the transfer right now. Please try again.';
+      setLastError(friendly);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `err_${Date.now()}`,
+          role: 'assistant',
+          text: friendly,
+          response: { kind: 'error', text: friendly },
+        },
+      ]);
+    } finally {
+      setConfirmingApprovalId(null);
+      setProcessing(false);
+      setTimeout(() => scrollToBottom(true), 80);
+      setTimeout(() => scrollToBottom(true), 250);
     }
   };
 
@@ -305,7 +431,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
       {
         id: 'welcome',
         role: 'assistant',
-        text: 'Hello Henry! I am Fargo®, your personal AI banking assistant. You can speak or type to check balances, review spending, or send money.',
+        text: getGreetingMessage(),
       },
     ]);
   };
@@ -395,13 +521,14 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
         ref={scroll}
         contentContainerStyle={styles.messagesContainer}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        onContentSizeChange={() => scrollToBottom(true)}
+        onLayout={() => scrollToBottom(false)}
       >
         {messages.map((message) => {
           const isUser = message.role === 'user';
           const isSpeakingThis = speakingMessageId === message.id;
           const approval = message.response?.approval;
-          const isBalanceIntent = message.text.toLowerCase().includes('balance') || message.text.toLowerCase().includes('checking');
-          const isDiningIntent = message.text.toLowerCase().includes('dining') || message.text.toLowerCase().includes('spending');
 
           return (
             <View
@@ -445,15 +572,8 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
                   </View>
                 )}
 
-                {/* Message Text */}
-                <Text
-                  style={[
-                    styles.messageText,
-                    isUser ? styles.userMessageText : styles.assistantMessageText,
-                  ]}
-                >
-                  {message.text}
-                </Text>
+                {/* Message Text with Markdown formatting */}
+                <ChatMarkdown content={message.text} isUser={isUser} />
 
                 {/* ─── Rich Embedded Widget: Transfer Approval Card ─── */}
                 {approval && !isUser && (
@@ -464,7 +584,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
                     </View>
 
                     <Text style={styles.transferAmountLarge}>
-                      ${(approval.amountPaise / 100).toFixed(2)}
+                      ₹{(approval.amountPaise / 100).toFixed(2)}
                     </Text>
 
                     <View style={styles.transferDetailsBox}>
@@ -477,81 +597,46 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
                       <View style={styles.transferRow}>
                         <Text style={styles.transferRowLabel}>From:</Text>
                         <Text style={styles.transferRowVal}>
-                          EVERYDAY CHECKING...0987
+                          Everyday Checking •••• 0987
                         </Text>
                       </View>
                       <View style={styles.transferRow}>
                         <Text style={styles.transferRowLabel}>Transfer Fee:</Text>
                         <Text style={[styles.transferRowVal, { color: '#059669', fontWeight: '700' }]}>
-                          $0.00 (Free)
+                          ₹0.00 (Free)
                         </Text>
                       </View>
                     </View>
 
                     <Pressable
-                      style={styles.authorizeTransferBtn}
-                      onPress={() => {
-                        handleClose();
-                        router.push('/transfer/review');
-                      }}
+                      testID={`confirm-transfer-btn-${approval.approvalId}`}
+                      disabled={confirmingApprovalId === approval.approvalId || processing || approval.consumed || approval.status === 'COMPLETED'}
+                      style={[
+                        styles.authorizeTransferBtn,
+                        (confirmingApprovalId === approval.approvalId || approval.consumed || approval.status === 'COMPLETED') && styles.authorizeBtnDisabled,
+                      ]}
+                      onPress={() => void handleConfirmTransfer(approval)}
                     >
-                      <Text style={styles.authorizeBtnText}>Review & Authorize Transfer</Text>
-                      <ChevronRight size={16} color="#FFFFFF" />
+                      {confirmingApprovalId === approval.approvalId ? (
+                        <View style={styles.btnLoadingRow}>
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                          <Text style={styles.authorizeBtnText}>Processing confirmation…</Text>
+                        </View>
+                      ) : approval.consumed || approval.status === 'COMPLETED' ? (
+                        <View style={styles.btnLoadingRow}>
+                          <Text style={styles.authorizeBtnText}>Transfer Confirmed ✓</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.btnLoadingRow}>
+                          <Text style={styles.authorizeBtnText}>Confirm transfer</Text>
+                          <ChevronRight size={16} color="#FFFFFF" />
+                        </View>
+                      )}
                     </Pressable>
                   </View>
                 )}
 
-                {/* ─── Rich Embedded Widget: Quick Account Balances ─── */}
-                {!isUser && isBalanceIntent && !approval && (
-                  <View style={styles.richBalanceWidget}>
-                    <View style={styles.balancePill}>
-                      <Wallet size={16} color="#582C83" />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.balanceAccountName}>EVERYDAY CHECKING...0987</Text>
-                        <Text style={styles.balanceSub}>Available balance</Text>
-                      </View>
-                      <Text style={styles.balanceAmountText}>$2,667.93</Text>
-                    </View>
-                    <View style={styles.balancePill}>
-                      <CreditCard size={16} color="#D97706" />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.balanceAccountName}>WAY2SAVE ...6543</Text>
-                        <Text style={styles.balanceSub}>Available balance</Text>
-                      </View>
-                      <Text style={styles.balanceAmountText}>$1,636.85</Text>
-                    </View>
-                  </View>
-                )}
 
-                {/* ─── Rich Embedded Widget: Spending Breakdown Mini ─── */}
-                {!isUser && isDiningIntent && !approval && (
-                  <View style={styles.richSpendingWidget}>
-                    <View style={styles.spendingWidgetHeader}>
-                      <TrendingUp size={16} color="#582C83" />
-                      <Text style={styles.spendingWidgetTitle}>Spending Breakdown</Text>
-                    </View>
-                    <View style={styles.progressContainer}>
-                      <View style={[styles.progressBar, { width: '45%', backgroundColor: '#D97706' }]} />
-                      <View style={[styles.progressBar, { width: '35%', backgroundColor: '#7C3AED' }]} />
-                      <View style={[styles.progressBar, { width: '20%', backgroundColor: '#2563EB' }]} />
-                    </View>
-                    <View style={styles.spendingLegend}>
-                      <Text style={styles.legendItem}>🍽 Dining: $640.00 (45%)</Text>
-                      <Text style={styles.legendItem}>🛍 Shopping: $495.00 (35%)</Text>
-                      <Text style={styles.legendItem}>⚡ Utility: $280.00 (20%)</Text>
-                    </View>
-                    <Pressable
-                      style={styles.viewFullAnalysisBtn}
-                      onPress={() => {
-                        handleClose();
-                        router.push('/spending');
-                      }}
-                    >
-                      <Text style={styles.viewFullAnalysisText}>Open Full Spending Report</Text>
-                      <ChevronRight size={13} color="#582C83" />
-                    </Pressable>
-                  </View>
-                )}
               </View>
             </View>
           );
@@ -611,6 +696,9 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
         <TextInput
           value={text}
           onChangeText={setText}
+          onFocus={() => {
+            setTimeout(() => scrollToBottom(true), 120);
+          }}
           onSubmitEditing={() => void send()}
           placeholder="Message Fargo or tap mic..."
           placeholderTextColor="#999999"
@@ -1024,6 +1112,16 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 10,
     marginTop: 4,
+  },
+  authorizeBtnDisabled: {
+    backgroundColor: '#9CA3AF',
+    opacity: 0.85,
+  },
+  btnLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   authorizeBtnText: {
     color: '#FFFFFF',

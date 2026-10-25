@@ -118,7 +118,7 @@ def _seed_demo(session: Session, settings, rng: random.Random) -> None:
     if session.get(User, DEMO_USER_ID) is not None:
         return
 
-    user = User(id=DEMO_USER_ID, display_name="Alex Hermes", profile="hermes_bank_01")
+    user = User(id=DEMO_USER_ID, display_name="Sabbu", profile="hermes_bank_01")
     session.add(user)
 
     account = Account(

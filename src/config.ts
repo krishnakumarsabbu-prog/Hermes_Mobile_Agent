@@ -3,12 +3,26 @@
 // Set EXPO_PUBLIC_API_MODE=mock to fall back to the in-app mock services for
 // isolated UI development.
 
+import Constants from 'expo-constants';
+
+const getBaseUrl = (): string => {
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    return process.env.EXPO_PUBLIC_API_URL;
+  }
+  // When running on a physical phone via Expo Go, auto-resolve Metro host PC's IP
+  const hostUri = Constants.expoConfig?.hostUri;
+  if (hostUri) {
+    const host = hostUri.split(':')[0];
+    if (host && host !== 'localhost' && host !== '127.0.0.1') {
+      return `http://${host}:8000`;
+    }
+  }
+  return 'http://localhost:8000';
+};
+
 export const apiConfig = {
-  // Configurable via environment. Defaults to localhost for iOS simulator.
-  // For Android emulator use http://10.0.2.2:8000. For physical devices use
-  // your development machine's LAN address.
-  baseUrl: process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000',
-  timeoutMs: 15000,
+  baseUrl: getBaseUrl(),
+  timeoutMs: 120000,
 };
 
 export type ApiMode = 'mock' | 'http';

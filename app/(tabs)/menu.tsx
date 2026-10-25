@@ -52,10 +52,10 @@ export default function MenuScreen() {
         {/* Profile Card */}
         <View style={styles.profileCard}>
           <View style={styles.avatarBox}>
-            <Text style={styles.avatarText}>HM</Text>
+            <Text style={styles.avatarText}>S</Text>
           </View>
           <View style={styles.profileInfo}>
-            <Text style={styles.profileName}>Henry J. Miller</Text>
+            <Text style={styles.profileName}>Sabbu</Text>
             <Text style={styles.profileSub}>Customer since 2014 · Tier 1</Text>
           </View>
           <Pressable style={styles.editBtn}>

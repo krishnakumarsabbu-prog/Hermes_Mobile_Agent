@@ -99,8 +99,8 @@ export const HttpTransactionService: TransactionServiceContract = {
 // --- HTTP Assistant Service ---
 
 export const HttpAssistantService: AssistantServiceContract = {
-  sendMessage: async (message: string, conversationId?: string): Promise<AssistantResponse> => {
-    const raw = await api.post<Record<string, unknown>>('/api/v1/agent/chat', { message, conversationId });
+  sendMessage: async (message: string, conversationId?: string, action?: import('./serviceContracts').ChatAction): Promise<AssistantResponse> => {
+    const raw = await api.post<Record<string, unknown>>('/api/v1/agent/chat', { message, conversationId, action });
     return {
       kind: raw.kind as AssistantResponse['kind'],
       text: raw.text as string,

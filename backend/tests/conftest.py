@@ -21,6 +21,7 @@ def client(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HERMES_SEED_ACCOUNTS_MAX", "12")
     monkeypatch.setenv("HERMES_SEED_BENEFICIARIES", "20")
     monkeypatch.setenv("HERMES_SEED_TRANSACTIONS", "100")
+    monkeypatch.setenv("HERMES_GATEWAY_ENABLED", "false")
 
     # Reset cached settings and engine so the new env takes effect.
     from app.core import config as config_module

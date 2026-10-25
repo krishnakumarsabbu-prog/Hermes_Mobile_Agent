@@ -62,33 +62,111 @@ async def handle_message(
     conversation_id: Optional[str] = None,
     request_id: str = "",
     intent_id: Optional[str] = None,
+    action: Optional[dict[str, Any]] = None,
 ) -> dict:
     ctx = ToolContext(session=session, user_id=user_id, request_id=request_id, intent_id=intent_id or "")
     conversation = _ensure_conversation(session, user_id, conversation_id)
 
+    # Normalize corrupted rupee symbol (e.g. '?500' -> '₹500') caused by non-UTF8 transports/terminals
+    clean_message = re.sub(r"(^|\s)\?([0-9]+(?:\.[0-9]+)?)", r"\g<1>₹\2", message)
+
+    msg_time = now_utc_iso()
     user_msg = ConversationMessage(
         id=f"msg_{uuid.uuid4().hex[:16]}",
         conversation_id=conversation.id,
         role="user",
-        text=message,
-        created_at=now_utc_iso(),
+        text=clean_message,
+        created_at=msg_time,
     )
     session.add(user_msg)
-    session.flush()
+    # Commit immediately to release the SQLite write lock before calling Hermes/MCP.
+    session.commit()
 
     settings = get_settings()
     response: dict
-    if settings.gateway_enabled:
+
+    if action is not None and action.get("type") == "confirm_transfer":
+        approval_id = (action.get("approvalId") or "").strip()
+        if not approval_id:
+            raise AppError("Approval ID is required.", code="VALIDATION_ERROR", status=422)
+
+        from app.services import transfer_service
+
+        # Authoritative transfer authorization via existing backend transfer service
+        auth_result = transfer_service.authorize(
+            session,
+            approval_id=approval_id,
+            user_id=user_id,
+            idempotency_key=f"chat-auth-{approval_id}",
+            request_id=request_id,
+        )
+        session.commit()
+
+        amount_str = format_inr(auth_result["approval"]["amountPaise"])
+        balance_str = format_inr(auth_result["updatedBalancePaise"])
+        beneficiary_name = auth_result["approval"]["beneficiary"]["fullName"]
+        txn_id = auth_result["transaction"]["id"]
+        ref = auth_result["transaction"]["reference"]
+
+        authoritative_text = (
+            f"Transfer of **{amount_str}** to **{beneficiary_name}** has been confirmed.\n\n"
+            f"- **Status:** Completed\n"
+            f"- **Transaction ID:** `{txn_id}`\n"
+            f"- **Reference:** `{ref}`\n"
+            f"- **Updated Balance:** **{balance_str}**"
+        )
+
+        response_text = authoritative_text
+        if settings.gateway_enabled:
+            try:
+                hermes_confirm_prompt = (
+                    f"Transfer approval {approval_id} for {amount_str} to {beneficiary_name} has been authorized and completed with transaction ID {txn_id}. "
+                    "Call get_transfer_status to verify its completed status and confirm the completed transfer to the user."
+                )
+                hermes_res = await _hermes_response(
+                    session=session,
+                    ctx=ctx,
+                    conversation=conversation,
+                    user_message=hermes_confirm_prompt,
+                    user_id=user_id,
+                    request_id=request_id,
+                    turn_start_time=msg_time,
+                )
+                h_text = hermes_res.get("text", "")
+                # Authoritative safeguard: only use model text if it accurately reflects completion
+                if (
+                    h_text
+                    and not h_text.startswith("(")
+                    and "not yet" not in h_text.lower()
+                    and "waiting_for_approval" not in h_text.lower()
+                    and "still awaiting" not in h_text.lower()
+                    and "pending" not in h_text.lower()
+                ):
+                    response_text = h_text
+                else:
+                    response_text = authoritative_text
+            except Exception as exc:
+                logger.warning('{"event":"hermes.confirm_error","error":"%s"}', str(exc))
+                response_text = authoritative_text
+
+        response = {
+            "kind": "transfer_complete",
+            "text": response_text,
+            "approval": auth_result["approval"],
+            "transaction": auth_result["transaction"],
+        }
+    elif settings.gateway_enabled:
         response = await _hermes_response(
             session=session,
             ctx=ctx,
             conversation=conversation,
-            user_message=message,
+            user_message=clean_message,
             user_id=user_id,
             request_id=request_id,
+            turn_start_time=msg_time,
         )
     else:
-        response = _orchestrate(ctx, message)
+        response = _orchestrate(ctx, clean_message)
 
     assistant_msg = ConversationMessage(
         id=f"msg_{uuid.uuid4().hex[:16]}",
@@ -99,7 +177,6 @@ async def handle_message(
         created_at=now_utc_iso(),
     )
     session.add(assistant_msg)
-    session.flush()
     session.commit()
 
     response["conversationId"] = conversation.id
@@ -138,6 +215,7 @@ async def _hermes_response(
     user_message: str,
     user_id: str,
     request_id: str,
+    turn_start_time: str = "",
 ) -> dict:
     """Ask Hermes for a grounded answer, falling back to the orchestrator.
 
@@ -189,6 +267,42 @@ async def _hermes_response(
         return response
 
     approval = prepared_approvals[-1] if prepared_approvals else None
+    if not approval and turn_start_time:
+        from app.models.account import Account
+        from app.models.approval import TransferApproval
+        from app.models.beneficiary import Beneficiary
+        from app.services.transfer_service import _approval_to_dict
+
+        recent_approval = (
+            session.query(TransferApproval)
+            .filter(
+                TransferApproval.user_id == user_id,
+                TransferApproval.status == "WAITING_FOR_APPROVAL",
+                TransferApproval.created_at >= turn_start_time,
+            )
+            .order_by(TransferApproval.created_at.desc())
+            .first()
+        )
+        if recent_approval:
+            account = session.get(Account, recent_approval.source_account_id)
+            beneficiary = session.get(Beneficiary, recent_approval.beneficiary_id)
+            if account and beneficiary:
+                approval = _approval_to_dict(recent_approval, beneficiary, account.balance_paise)
+
+    if approval:
+        status_val = approval.get("status")
+        # Authoritative guard: ensure model prose cannot claim completion while backend approval is still pending
+        if status_val in ("WAITING_FOR_APPROVAL", "PREPARED"):
+            lowered = text.lower()
+            if any(term in lowered for term in ("has been sent", "transferred", "completed", "complete", "money sent", "debited")):
+                if not any(term in lowered for term in ("pending", "approval", "confirm", "preview")):
+                    text = (
+                        f"Transfer preview prepared for **{format_inr(approval['amountPaise'])}** to "
+                        f"**{approval['beneficiary']['fullName']}**.\n\n"
+                        "⚠️ This is a pending approval only — no money has been moved yet. "
+                        "Please confirm to proceed."
+                    )
+
     return {
         "kind": "transfer_approval" if approval else "normal",
         "text": text,

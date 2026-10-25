@@ -34,6 +34,15 @@ async function request<T>(path: string, options: { method: string; body?: unknow
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), apiConfig.timeoutMs);
 
+  console.log(`\n================== [API REQUEST] ==================`);
+  console.log(`URL:    ${options.method} ${url}`);
+  if (options.body !== undefined) {
+    console.log(`Payload (JSON):\n${JSON.stringify(options.body, null, 2)}`);
+  } else {
+    console.log(`Payload: (no body payload)`);
+  }
+  console.log(`===================================================\n`);
+
   try {
     const res = await fetch(url, {
       method: options.method,
@@ -46,10 +55,16 @@ async function request<T>(path: string, options: { method: string; body?: unknow
     const body = text ? JSON.parse(text) : null;
 
     if (!res.ok) {
+      console.warn(`[API Error] ${options.method} ${url} returned status ${res.status}:`, body);
       throw parseError(res.status, body);
     }
+    console.log(`\n================== [API RESPONSE] ==================`);
+    console.log(`URL:    ${options.method} ${url} (${res.status})`);
+    console.log(`Body (JSON):\n${JSON.stringify(body, null, 2)}`);
+    console.log(`====================================================\n`);
     return body as T;
   } catch (err) {
+    console.warn(`[API Network/Request Failed] ${options.method} ${url}:`, err);
     if (err instanceof Error && err.name === 'AbortError') {
       const error: ApiError = { code: TIMEOUT_CODE, message: 'The request timed out. Please try again.', status: 0 };
       throw error;

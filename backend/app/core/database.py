@@ -21,7 +21,7 @@ from app.core.config import get_settings
 def _build_engine(db_url: str) -> Engine:
     engine = create_engine(
         db_url,
-        connect_args={"check_same_thread": False, "timeout": 30},
+        connect_args={"check_same_thread": False, "timeout": 120},
         future=True,
         pool_pre_ping=True,
     )
@@ -31,7 +31,7 @@ def _build_engine(db_url: str) -> Engine:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA foreign_keys=ON;")
-        cur.execute("PRAGMA busy_timeout=30000;")
+        cur.execute("PRAGMA busy_timeout=120000;")
         cur.execute("PRAGMA synchronous=NORMAL;")
         cur.close()
 

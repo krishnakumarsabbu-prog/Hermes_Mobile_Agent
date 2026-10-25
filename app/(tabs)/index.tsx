@@ -145,7 +145,7 @@ export default function AccountsScreen() {
           </View>
         </Animated.View>
 
-        {/* ─── Greeting Section: "Good evening, Henry" ─── */}
+        {/* ─── Greeting Section: "Good evening, Sabbu" ─── */}
         <Animated.View
           style={[
             styles.greetingSection,
@@ -155,7 +155,7 @@ export default function AccountsScreen() {
             },
           ]}
         >
-          <Text style={styles.greetingText}>{greetingTime}, Henry</Text>
+          <Text style={styles.greetingText}>{greetingTime}, Sabbu</Text>
         </Animated.View>
 
         {/* ─── Account Cards ─── */}

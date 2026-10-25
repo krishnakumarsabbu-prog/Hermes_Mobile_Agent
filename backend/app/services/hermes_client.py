@@ -70,6 +70,8 @@ def _chat_payload(
     return {
         "model": model,
         "messages": messages,
+        "temperature": 0,
+        "max_tokens": 600,
         "stream": False,
         "metadata": {"conversationId": conversation_id, "requestId": request_id},
     }
@@ -131,21 +133,41 @@ async def chat(
 
     base = settings.gateway_base_url.rstrip("/")
     url = f"{base}/v1/chat/completions"
-    timeout = httpx.Timeout(settings.gateway_timeout_seconds, connect=5.0)
+    timeout = httpx.Timeout(
+        settings.gateway_timeout_seconds,
+        connect=10.0,
+        read=settings.gateway_timeout_seconds,
+        write=settings.gateway_timeout_seconds,
+    )
     tool_calls_made: list[dict[str, Any]] = []
+
+    headers = {"Content-Type": "application/json"}
+    if settings.gateway_api_key:
+        headers["Authorization"] = f"Bearer {settings.gateway_api_key}"
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(max(1, settings.gateway_max_iterations)):
+            chat_body = _chat_payload(
+                model=settings.gateway_model,
+                messages=messages,
+                conversation_id=conversation_id,
+                request_id=request_id,
+            )
+            print("\n" + "=" * 60)
+            print(f">>> [HERMES GATEWAY REQUEST] {url}")
+            print(f"Payload:\n{json.dumps(chat_body, indent=2, ensure_ascii=False)}")
+            print("=" * 60 + "\n")
+
             try:
                 resp = await client.post(
                     url,
-                    json=_chat_payload(
-                        model=settings.gateway_model,
-                        messages=messages,
-                        conversation_id=conversation_id,
-                        request_id=request_id,
-                    ),
+                    headers=headers,
+                    json=chat_body,
                 )
+                print("\n" + "=" * 60)
+                print(f"<<< [HERMES GATEWAY RESPONSE] Status: {resp.status_code}")
+                print(f"Body:\n{resp.text}")
+                print("=" * 60 + "\n")
             except httpx.ConnectError:
                 logger.warning('{"event":"hermes.connect_failed","requestId":"%s"}', request_id)
                 raise HermesError(
@@ -186,12 +208,13 @@ async def chat(
                 )
             if resp.status_code >= 400:
                 logger.warning(
-                    '{"event":"hermes.4xx","requestId":"%s","status":%d}',
+                    '{"event":"hermes.4xx","requestId":"%s","status":%d,"body":"%s"}',
                     request_id,
                     resp.status_code,
+                    resp.text,
                 )
                 raise HermesError(
-                    "The assistant rejected the request. Please rephrase and try again.",
+                    f"The assistant rejected the request ({resp.status_code}): {resp.text}",
                     code="HERMES_BAD_REQUEST",
                 )
 
@@ -278,21 +301,20 @@ async def _resolve_tool_call(
 
 
 def system_prompt(*, user_id: str) -> str:
-    """System instructions that anchor Hermes to the real banking tools."""
+    """Speed-optimized system instructions that anchor Hermes to the banking tools."""
     return (
-        "You are Fargo, a personal banking assistant for a simulated Indian "
-        f"rupee account (user {user_id}). Use the registered personal-banking "
-        "MCP tools whenever the user asks about balances, transactions, "
-        "spending, beneficiaries, or transfers. Never invent account numbers, "
-        "balances, transaction ids, beneficiary ids, or approval ids; always "
-        "obtain them from tool results. Money is represented in integer paise "
-        "(1 INR = 100 paise).\n\n"
-        "Transfer rules: prepare_transfer only creates a pending approval and "
-        "never debits the account. Never tell a user a transfer was executed, "
-        "sent, or completed unless get_transfer_status returns COMPLETED. "
-        "Before preparing a transfer you must validate the beneficiary and "
-        "amount, summarise the transfer, and require explicit user "
-        "confirmation. Treat a vague 'okay' as confirmation only when the "
-        "exact beneficiary, amount, and currency were already shown.\n\n"
-        "If a tool returns no records, say so plainly. Keep replies concise."
+        f"You are a personal banking assistant for an Indian rupee account (user {user_id}).\n"
+        "Use the registered personal-banking MCP tools for balances, transactions, spending, "
+        "beneficiaries, and transfers. Never invent account numbers, balances, transaction ids, "
+        "beneficiary ids, or approval ids; always get them from tool results.\n"
+        "Transfer rules:\n"
+        "- prepare_transfer only creates a pending approval and never debits the account.\n"
+        "- Always validate the beneficiary and amount before preparing.\n"
+        "- Summarise the transfer and require explicit user confirmation.\n"
+        "- Treat a vague 'okay' as confirmation only when the exact beneficiary, amount, "
+        "and currency were already shown.\n"
+        "- Never tell the user a transfer was executed/sent/completed unless "
+        "get_transfer_status returns COMPLETED.\n"
+        "Format: bold currency amounts (e.g. **₹500.00**), numbered lists or bullets with "
+        "clear line breaks. If a tool returns no records, say so plainly. Keep replies short."
     )

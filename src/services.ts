@@ -131,7 +131,23 @@ export const TransferService: TransferServiceContract = {
 };
 
 export const MockAssistantService: AssistantServiceContract = {
-  sendMessage: async (message: string, _conversationId?: string): Promise<AssistantResponse> => {
+  sendMessage: async (message: string, _conversationId?: string, action?: import('./serviceContracts').ChatAction): Promise<AssistantResponse> => {
+    if (action?.type === 'confirm_transfer') {
+      try {
+        const result = await TransferService.authorizeTransfer({ approvalId: action.approvalId });
+        return {
+          kind: 'transfer_complete',
+          approval: result.approval,
+          text: `Transfer of **${formatINR(result.approval.amountPaise)}** to **${result.approval.beneficiary.fullName}** has been confirmed.\n\n- **Status:** Completed\n- **Transaction ID:** \`${result.transaction.id}\`\n- **Updated Balance:** **${formatINR(result.updatedBalancePaise)}**`,
+        };
+      } catch (error) {
+        return {
+          kind: 'error',
+          text: error instanceof Error ? error.message : 'I could not authorize that transfer.',
+        };
+      }
+    }
+
     const normalized = message.toLowerCase();
     const summary = await getSummary();
 

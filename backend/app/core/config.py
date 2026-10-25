@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     gateway_base_url: str = "http://127.0.0.1:8642"
     gateway_model: str = "hermes-3"
     gateway_enabled: bool = False
-    gateway_timeout_seconds: float = 30.0
+    gateway_api_key: str = "HrmLocal12345_8fK2vN7xQ4pL9wR3mT6zB1cY5dJ0sA"
+    gateway_timeout_seconds: float = 120.0
     # Maximum number of assistant round-trips allowed while Hermes iterates on
     # tool calls before producing a final answer. Guards against runaway loops.
     gateway_max_iterations: int = 8

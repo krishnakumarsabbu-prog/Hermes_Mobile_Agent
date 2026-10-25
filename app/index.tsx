@@ -17,8 +17,8 @@ import { Lock, User, Eye, EyeOff } from 'lucide-react-native';
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export default function LoginScreen() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('sabbu');
+  const [password, setPassword] = useState('sabbu');
   const [showPassword, setShowPassword] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
 

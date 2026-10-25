@@ -33,8 +33,13 @@ export interface TransactionServiceContract {
   getTransaction(id: string): Promise<Transaction | undefined>;
 }
 
+export interface ChatAction {
+  type: 'confirm_transfer';
+  approvalId: string;
+}
+
 export interface AssistantServiceContract {
-  sendMessage(message: string, conversationId?: string): Promise<AssistantResponse>;
+  sendMessage(message: string, conversationId?: string, action?: ChatAction): Promise<AssistantResponse>;
 }
 
 export interface TransferServiceContract {

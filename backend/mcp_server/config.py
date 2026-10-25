@@ -35,8 +35,8 @@ class ServerSettings(BaseSettings):
     send_dev_user_header: bool = Field(default=True)
 
     # HTTP client tuning (seconds).
-    connect_timeout: float = Field(default=5.0, gt=0)
-    read_timeout: float = Field(default=15.0, gt=0)
+    connect_timeout: float = Field(default=10.0, gt=0)
+    read_timeout: float = Field(default=120.0, gt=0)
 
     # Maximum pagination size enforced client-side (mirrors backend max).
     max_page_size: int = Field(default=100, gt=0, le=500)
@@ -49,7 +49,7 @@ class ServerSettings(BaseSettings):
     enable_authorize_tool: bool = Field(default=False)
 
     # Request timeout for the whole MCP tool call (seconds).
-    request_timeout: float = Field(default=20.0, gt=0)
+    request_timeout: float = Field(default=120.0, gt=0)
 
     @field_validator("backend_base_url")
     @classmethod

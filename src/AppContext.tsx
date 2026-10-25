@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { AccountSummary, ChatMessage, Transaction, TransferApproval, TransferResult } from './models';
-import { apiMode } from './config';
+import { apiConfig, apiMode } from './config';
 import { AccountService as MockAccountService, TransactionService as MockTransactionService, TransferService as MockTransferService, MockAssistantService } from './services';
 import { HttpAccountService, HttpTransactionService, HttpTransferService, HttpAssistantService } from './httpServices';
 import { AccountServiceContract, AssistantServiceContract, TransactionServiceContract, TransferServiceContract } from './serviceContracts';
@@ -21,7 +21,9 @@ function withFallback<T extends object>(httpService: T, mockService: T): T {
               (typeof err?.message === 'string' && err.message.toLowerCase().includes('network')) ||
               err?.status === 0
             ) {
-              console.warn(`[API Fallback] Backend unreachable on ${String(prop)}, serving from mock.`);
+              console.warn(
+                `[API Fallback] Backend unreachable on ${String(prop)} (Base URL: ${apiConfig.baseUrl}), serving from mock. Reason: ${err?.message || err?.code || 'Network failure'}`
+              );
               const mockFn = (mockService as any)[prop];
               if (typeof mockFn === 'function') {
                 return await mockFn.apply(mockService, args);
@@ -150,7 +152,14 @@ export const useApp = (): AppContextValue => {
   return value;
 };
 
+export const getGreetingMessage = (userName = 'Sabbu'): string => {
+  const hour = new Date().getHours();
+  const greetingTime = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  return `${greetingTime}, ${userName}! How can I help you today?`;
+};
+
 export const useChat = () =>
   useState<ChatMessage[]>([
-    { id: 'welcome', role: 'assistant', text: 'Good evening, Alex. I can help you understand your spending or prepare a simulated transfer.' },
+    { id: 'welcome', role: 'assistant', text: getGreetingMessage('Sabbu') },
   ]);
+

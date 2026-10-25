@@ -44,7 +44,13 @@ class AssistantResponse(BaseModel):
     conversationId: Optional[str] = None
 
 
+class ChatAction(BaseModel):
+    type: Literal["confirm_transfer"] = "confirm_transfer"
+    approvalId: str = Field(min_length=1, alias="approvalId")
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
     conversationId: Optional[str] = None
     intentId: Optional[str] = None
+    action: Optional[ChatAction] = None
