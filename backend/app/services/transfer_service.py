@@ -56,14 +56,17 @@ def prepare(session: Session, *, user_id: str, beneficiary_id: str, amount_paise
     if amount_paise > account.balance_paise:
         raise AppError("This transfer exceeds your available balance.", code=INSUFFICIENT_FUNDS, status=422)
 
-    # Idempotency: return prior result for same key+payload.
+    # Idempotency: return prior result for same key+payload if not expired.
     existing = idempotency.lookup(session, idempotency_key, user_id)
     endpoint = "transfers/prepare"
     payload = {"beneficiaryId": beneficiary_id, "amountPaise": amount_paise, "currency": currency}
     if existing is not None and existing.endpoint == endpoint:
         idempotency.check_conflict(existing, payload)
         import json
-        return json.loads(existing.response_json)
+        cached_resp = json.loads(existing.response_json)
+        if not cached_resp.get("expiresAt") or utc_now() < _parse_iso(cached_resp["expiresAt"]):
+            return cached_resp
+
 
     approval = TransferApproval(
         id=f"appr_{uuid.uuid4().hex[:20]}",

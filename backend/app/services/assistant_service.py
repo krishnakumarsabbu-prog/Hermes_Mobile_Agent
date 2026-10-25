@@ -85,6 +85,26 @@ async def handle_message(
     settings = get_settings()
     response: dict
 
+    # If user sent an affirmative confirmation ("yes", "confirm", etc.) without an explicit action,
+    # auto-bind it to the user's active pending transfer approval.
+    affirmative_words = {"yes", "confirm", "proceed", "approve", "ok", "okay", "sure", "yep", "yeah", "do it", "confirm transfer", "yes please", "please confirm", "go ahead"}
+    normalized_text = clean_message.strip().lower()
+    is_affirmation = normalized_text in affirmative_words or any(normalized_text.startswith(w + " ") for w in affirmative_words)
+
+    if action is None and is_affirmation:
+        from app.models.approval import TransferApproval
+        pending_candidate = (
+            session.query(TransferApproval)
+            .filter(
+                TransferApproval.user_id == user_id,
+                TransferApproval.status == "WAITING_FOR_APPROVAL",
+            )
+            .order_by(TransferApproval.created_at.desc())
+            .first()
+        )
+        if pending_candidate:
+            action = {"type": "confirm_transfer", "approvalId": pending_candidate.id}
+
     if action is not None and action.get("type") == "confirm_transfer":
         approval_id = (action.get("approvalId") or "").strip()
         if not approval_id:
@@ -101,6 +121,7 @@ async def handle_message(
             request_id=request_id,
         )
         session.commit()
+
 
         amount_str = format_inr(auth_result["approval"]["amountPaise"])
         balance_str = format_inr(auth_result["updatedBalancePaise"])
@@ -267,27 +288,57 @@ async def _hermes_response(
         return response
 
     approval = prepared_approvals[-1] if prepared_approvals else None
-    if not approval and turn_start_time:
+    if not approval:
         from app.models.account import Account
         from app.models.approval import TransferApproval
         from app.models.beneficiary import Beneficiary
         from app.services.transfer_service import _approval_to_dict
 
-        recent_approval = (
-            session.query(TransferApproval)
-            .filter(
-                TransferApproval.user_id == user_id,
-                TransferApproval.status == "WAITING_FOR_APPROVAL",
-                TransferApproval.created_at >= turn_start_time,
+        # 1. Search for approval ID directly in model prose (e.g. "Approval ID: appr_242212d8f6864e599707")
+        appr_id_match = re.search(r"\b(appr_[a-fA-F0-9]+)\b", text)
+        if appr_id_match:
+            candidate = session.get(TransferApproval, appr_id_match.group(1))
+            if candidate and candidate.user_id == user_id:
+                account = session.get(Account, candidate.source_account_id)
+                beneficiary = session.get(Beneficiary, candidate.beneficiary_id)
+                if account and beneficiary:
+                    approval = _approval_to_dict(candidate, beneficiary, account.balance_paise)
+
+        # 2. Check if prose indicates WAITING_FOR_APPROVAL or transfer preview
+        if not approval and any(term in text.lower() for term in ("waiting_for_approval", "pending your confirmation", "pending approval", "transfer prepared")):
+            recent_approval = (
+                session.query(TransferApproval)
+                .filter(
+                    TransferApproval.user_id == user_id,
+                    TransferApproval.status == "WAITING_FOR_APPROVAL",
+                )
+                .order_by(TransferApproval.created_at.desc())
+                .first()
             )
-            .order_by(TransferApproval.created_at.desc())
-            .first()
-        )
-        if recent_approval:
-            account = session.get(Account, recent_approval.source_account_id)
-            beneficiary = session.get(Beneficiary, recent_approval.beneficiary_id)
-            if account and beneficiary:
-                approval = _approval_to_dict(recent_approval, beneficiary, account.balance_paise)
+            if recent_approval:
+                account = session.get(Account, recent_approval.source_account_id)
+                beneficiary = session.get(Beneficiary, recent_approval.beneficiary_id)
+                if account and beneficiary:
+                    approval = _approval_to_dict(recent_approval, beneficiary, account.balance_paise)
+
+        # 3. Check for recently created approval since turn_start_time
+        if not approval and turn_start_time:
+            recent_approval = (
+                session.query(TransferApproval)
+                .filter(
+                    TransferApproval.user_id == user_id,
+                    TransferApproval.status == "WAITING_FOR_APPROVAL",
+                    TransferApproval.created_at >= turn_start_time,
+                )
+                .order_by(TransferApproval.created_at.desc())
+                .first()
+            )
+            if recent_approval:
+                account = session.get(Account, recent_approval.source_account_id)
+                beneficiary = session.get(Beneficiary, recent_approval.beneficiary_id)
+                if account and beneficiary:
+                    approval = _approval_to_dict(recent_approval, beneficiary, account.balance_paise)
+
 
     if approval:
         status_val = approval.get("status")
@@ -322,9 +373,15 @@ def _conversation_for_hermes(conversation: Conversation, *, latest_user: str) ->
             history.append({"role": "user", "content": m.text})
         elif m.role == "assistant":
             history.append({"role": "assistant", "content": m.text})
-    if not history or history[-1].get("content") != latest_user:
+    if not history:
         history.append({"role": "user", "content": latest_user})
+    elif history[-1].get("content") != latest_user:
+        if history[-1].get("role") == "user":
+            history[-1]["content"] = f"{history[-1]['content']}\n\n{latest_user}"
+        else:
+            history.append({"role": "user", "content": latest_user})
     return history
+
 
 
 def _ensure_conversation(session: Session, user_id: str, conversation_id: Optional[str]) -> Conversation:
