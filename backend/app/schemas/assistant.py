@@ -34,6 +34,7 @@ class AssistantResponse(BaseModel):
         "history",
         "transfer_approval",
         "transfer_complete",
+        "transfer_result",
         "cancelled",
         "error",
         "clarification",
@@ -44,9 +45,27 @@ class AssistantResponse(BaseModel):
     conversationId: Optional[str] = None
 
 
+class ChatActionContext(BaseModel):
+    """Client-supplied context for an approval action.
+
+    These fields are informational only and let the frontend describe the
+    approval it is acting on. The backend never trusts them as the source of
+    truth for amount, beneficiary, ownership, or status; it always re-fetches
+    the authoritative approval record by approvalId and validates it.
+    """
+
+    approvalId: Optional[str] = Field(default=None, alias="approvalId")
+    beneficiaryId: Optional[str] = Field(default=None, alias="beneficiaryId")
+    beneficiaryName: Optional[str] = Field(default=None, alias="beneficiaryName")
+    amountPaise: Optional[int] = Field(default=None, alias="amountPaise")
+    sourceAccountId: Optional[str] = Field(default=None, alias="sourceAccountId")
+    status: Optional[str] = None
+
+
 class ChatAction(BaseModel):
-    type: Literal["confirm_transfer"] = "confirm_transfer"
+    type: Literal["confirm_transfer", "approve_transfer", "reject_transfer"] = "confirm_transfer"
     approvalId: str = Field(min_length=1, alias="approvalId")
+    context: Optional[ChatActionContext] = None
 
 
 class ChatRequest(BaseModel):

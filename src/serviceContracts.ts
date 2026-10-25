@@ -34,8 +34,16 @@ export interface TransactionServiceContract {
 }
 
 export interface ChatAction {
-  type: 'confirm_transfer';
+  type: 'confirm_transfer' | 'approve_transfer' | 'reject_transfer';
   approvalId: string;
+  context?: {
+    approvalId?: string;
+    beneficiaryId?: string;
+    beneficiaryName?: string;
+    amountPaise?: number;
+    sourceAccountId?: string;
+    status?: string;
+  };
 }
 
 export interface AssistantServiceContract {

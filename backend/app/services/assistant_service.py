@@ -27,7 +27,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.errors import AppError
+from app.core.errors import AppError, APPROVAL_ALREADY_USED, APPROVAL_EXPIRED
 from app.core.logging import get_logger
 from app.models.conversation import Conversation, ConversationMessage
 from app.services import hermes_client
@@ -176,6 +176,32 @@ async def handle_message(
             "approval": auth_result["approval"],
             "transaction": auth_result["transaction"],
         }
+    elif action is not None and action.get("type") == "approve_transfer":
+        response = await _handle_approval_decision(
+            session=session,
+            ctx=ctx,
+            conversation=conversation,
+            user_id=user_id,
+            request_id=request_id,
+            msg_time=msg_time,
+            approval_id=(action.get("approvalId") or "").strip(),
+            decision="approve",
+            user_message=clean_message,
+            settings=settings,
+        )
+    elif action is not None and action.get("type") == "reject_transfer":
+        response = await _handle_approval_decision(
+            session=session,
+            ctx=ctx,
+            conversation=conversation,
+            user_id=user_id,
+            request_id=request_id,
+            msg_time=msg_time,
+            approval_id=(action.get("approvalId") or "").strip(),
+            decision="reject",
+            user_message=clean_message,
+            settings=settings,
+        )
     elif settings.gateway_enabled:
         response = await _hermes_response(
             session=session,
@@ -202,6 +228,159 @@ async def handle_message(
 
     response["conversationId"] = conversation.id
     return response
+
+
+async def _handle_approval_decision(
+    *,
+    session: Session,
+    ctx: ToolContext,
+    conversation: Conversation,
+    user_id: str,
+    request_id: str,
+    msg_time: str,
+    approval_id: str,
+    decision: str,
+    user_message: str,
+    settings: Any,
+) -> dict:
+    """Validate and execute an explicit approve/reject decision on a pending approval.
+
+    The client-supplied context is never trusted for amount, beneficiary,
+    ownership, or status. The authoritative approval record is fetched by
+    approvalId, validated for ownership, pending state, and expiry, then the
+    existing trusted transfer service performs the state transition. Hermes is
+    then asked (when enabled) to continue the same conversation with the
+    validated context and explicit decision so it can produce a grounded
+    summary; the backend state, not the model prose, is the source of truth.
+    """
+    if not approval_id:
+        raise AppError("Approval ID is required.", code="VALIDATION_ERROR", status=422)
+    if decision not in ("approve", "reject"):
+        raise AppError("Unknown approval action.", code="VALIDATION_ERROR", status=422)
+
+    from app.models.account import Account
+    from app.models.approval import TransferApproval as _Approval
+    from app.models.beneficiary import Beneficiary
+    from app.services import transfer_service
+    from app.services.transfer_service import _approval_to_dict, _parse_iso
+    from app.services.money import utc_now
+
+    # Pre-flight authoritative validation: ownership, pending state, expiry.
+    approval = (
+        session.query(_Approval)
+        .filter(_Approval.id == approval_id, _Approval.user_id == user_id)
+        .first()
+    )
+    if approval is None:
+        raise AppError("This approval is no longer available.", code="NOT_FOUND", status=404)
+    if approval.status not in ("PREPARED", "WAITING_FOR_APPROVAL"):
+        raise AppError(
+            f"This approval is {approval.status.lower()} and cannot be {decision}d.",
+            code=APPROVAL_ALREADY_USED,
+            status=409,
+        )
+    if utc_now() > _parse_iso(approval.expires_at):
+        from app.models.approval import APPROVAL_EXPIRED as MODEL_EXPIRED
+        approval.status = MODEL_EXPIRED
+        approval.decision_at = now_utc_iso()
+        from app.services import audit_service as _audit
+        _audit.record(session, user_id=user_id, action="transfer.expired", target=approval.id, request_id=request_id)
+        session.commit()
+        raise AppError("This approval has expired.", code=APPROVAL_EXPIRED, status=409)
+
+    beneficiary = session.get(Beneficiary, approval.beneficiary_id)
+    account = session.get(Account, approval.source_account_id)
+    if beneficiary is None or account is None:
+        raise AppError("This approval is no longer available.", code="NOT_FOUND", status=404)
+
+    amount_str = format_inr(approval.amount_paise)
+    beneficiary_name = beneficiary.full_name
+
+    if decision == "approve":
+        result = transfer_service.authorize(
+            session,
+            approval_id=approval_id,
+            user_id=user_id,
+            idempotency_key=f"chat-approve-{approval_id}",
+            request_id=request_id,
+        )
+        session.commit()
+        authoritative_text = (
+            f"Transfer of **{amount_str}** to **{beneficiary_name}** has been approved and completed.\n\n"
+            f"- **Status:** Completed\n"
+            f"- **Transaction ID:** `{result['transaction']['id']}`\n"
+            f"- **Reference:** `{result['transaction']['reference']}`\n"
+            f"- **Updated Balance:** **{format_inr(result['updatedBalancePaise'])}**"
+        )
+        hermes_prompt = (
+            f"The user explicitly approved the pending simulated transfer (approval {approval_id}) "
+            f"of {amount_str} to {beneficiary_name}. The backend has authorized and completed it with "
+            f"transaction ID {result['transaction']['id']}. Call get_transfer_status to verify the "
+            f"completed status, then confirm the completed transfer to the user."
+        )
+        approval_out = result["approval"]
+    else:  # reject
+        cancel_result = transfer_service.cancel(
+            session,
+            approval_id=approval_id,
+            user_id=user_id,
+            request_id=request_id,
+            idempotency_key=f"chat-reject-{approval_id}",
+        )
+        session.commit()
+        authoritative_text = (
+            f"Transfer of **{amount_str}** to **{beneficiary_name}** has been rejected and cancelled.\n\n"
+            f"- **Status:** {cancel_result['status'].title()}\n"
+            f"- No money was moved."
+        )
+        hermes_prompt = (
+            f"The user explicitly rejected the pending simulated transfer (approval {approval_id}) "
+            f"of {amount_str} to {beneficiary_name}. The backend has cancelled it. Call get_transfer_status "
+            f"to verify the cancelled status, then confirm the cancellation to the user."
+        )
+        approval_out = cancel_result
+
+    response_text = authoritative_text
+    if settings.gateway_enabled:
+        try:
+            hermes_res = await _hermes_response(
+                session=session,
+                ctx=ctx,
+                conversation=conversation,
+                user_message=hermes_prompt,
+                user_id=user_id,
+                request_id=request_id,
+                turn_start_time=msg_time,
+            )
+            h_text = hermes_res.get("text", "")
+            lowered = (h_text or "").lower()
+            if decision == "approve":
+                ok = (
+                    h_text
+                    and not h_text.startswith("(")
+                    and "not yet" not in lowered
+                    and "waiting_for_approval" not in lowered
+                    and "still awaiting" not in lowered
+                    and "pending" not in lowered
+                )
+            else:
+                ok = (
+                    h_text
+                    and not h_text.startswith("(")
+                    and ("cancel" in lowered or "reject" in lowered)
+                    and "completed" not in lowered
+                    and "sent" not in lowered
+                )
+            response_text = h_text if ok else authoritative_text
+        except Exception as exc:
+            logger.warning('{"event":"hermes.%s_error","error":"%s"}', decision, str(exc))
+            response_text = authoritative_text
+
+    return {
+        "kind": "transfer_result",
+        "text": response_text,
+        "approval": approval_out,
+    }
 
 
 def get_conversation(session: Session, *, user_id: str, conversation_id: str) -> dict:

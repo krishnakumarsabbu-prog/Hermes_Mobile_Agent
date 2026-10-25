@@ -226,7 +226,27 @@ def authorize(session: Session, *, approval_id: str, user_id: str, idempotency_k
     return response
 
 
-def cancel(session: Session, *, approval_id: str, user_id: str, request_id: str = "") -> dict:
+def cancel(
+    session: Session,
+    *,
+    approval_id: str,
+    user_id: str,
+    request_id: str = "",
+    idempotency_key: str | None = None,
+) -> dict:
+    # Idempotency: if the same caller already attempted this cancel, return the
+    # prior result rather than erroring or re-mutating. This makes rejection
+    # retries safe (a failed HTTP does not imply the server did nothing).
+    endpoint = "transfers/cancel"
+    payload = {"approvalId": approval_id}
+    if idempotency_key:
+        existing = idempotency.lookup(session, idempotency_key, user_id)
+        if existing is not None and existing.endpoint == endpoint:
+            idempotency.check_conflict(existing, payload)
+            import json
+
+            return json.loads(existing.response_json)
+
     approval = approval_repository.get_approval_for_user(session, approval_id, user_id)
     if approval is None:
         raise NotFoundError("This approval is no longer available.")
@@ -238,7 +258,18 @@ def cancel(session: Session, *, approval_id: str, user_id: str, request_id: str 
     beneficiary = beneficiary_repository.get_beneficiary(session, user_id, approval.beneficiary_id)
     account = account_repository.get_account_by_id(session, approval.source_account_id)
     audit_service.record(session, user_id=user_id, action="transfer.cancel", target=approval.id, request_id=request_id)
-    return _approval_to_dict(approval, beneficiary, account.balance_paise, consumed=True)
+    response = _approval_to_dict(approval, beneficiary, account.balance_paise, consumed=True)
+    if idempotency_key:
+        idempotency.save(
+            session,
+            key=idempotency_key,
+            user_id=user_id,
+            endpoint=endpoint,
+            payload=payload,
+            status_code=200,
+            response=response,
+        )
+    return response
 
 
 def status(session: Session, *, approval_id: str, user_id: str) -> dict:

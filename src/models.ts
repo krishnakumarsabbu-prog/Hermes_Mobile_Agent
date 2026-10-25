@@ -69,7 +69,7 @@ export interface TransferResult {
 }
 
 export interface AssistantResponse {
-  kind: 'normal' | 'analysis' | 'history' | 'transfer_approval' | 'transfer_complete' | 'cancelled' | 'error' | 'clarification';
+  kind: 'normal' | 'analysis' | 'history' | 'transfer_approval' | 'transfer_complete' | 'transfer_result' | 'cancelled' | 'error' | 'clarification';
   text: string;
   approval?: TransferApproval;
   summary?: { spendingPaise: number; diningPaise: number; balancePaise: number; proposedTransferPaise: number; projectedBalancePaise: number };

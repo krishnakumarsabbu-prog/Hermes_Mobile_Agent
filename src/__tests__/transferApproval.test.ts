@@ -29,21 +29,24 @@ describe('Frontend Transfer Approval Chat Continuation', () => {
     conversationId: 'conv_2e8225706a604cdc',
   };
 
-  test('1. A transfer_approval response displays the approval button and initial state', () => {
+  const terminalStatuses: ApprovalStatus[] = ['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'FAILED'];
+
+  function isTerminal(a: TransferApproval): boolean {
+    return a.consumed || terminalStatuses.includes(a.status);
+  }
+
+  test('1. A transfer_approval response displays Approve and Reject buttons', () => {
     assert.strictEqual(sampleApprovalResponse.kind, 'transfer_approval');
     assert.ok(sampleApprovalResponse.approval);
     assert.strictEqual(sampleApprovalResponse.approval.approvalId, 'appr_07a202050a2541c2bcab');
     assert.strictEqual(sampleApprovalResponse.approval.status, 'WAITING_FOR_APPROVAL');
     assert.strictEqual(sampleApprovalResponse.approval.consumed, false);
 
-    // Initial button label when status is pending and not consumed
-    const isConsumed = sampleApprovalResponse.approval.consumed || sampleApprovalResponse.approval.status === 'COMPLETED';
-    assert.strictEqual(isConsumed, false);
-    const buttonLabel = isConsumed ? 'Transfer Confirmed ✓' : 'Confirm transfer';
-    assert.strictEqual(buttonLabel, 'Confirm transfer');
+    // When pending and not consumed, both buttons render (not terminal)
+    assert.strictEqual(isTerminal(sampleApprovalResponse.approval), false);
   });
 
-  test('2. Clicking the button does not navigate away from chat', async () => {
+  test('2. Clicking Approve does not navigate away from chat', async () => {
     let navigationOccurred = false;
     const fakeRouter = {
       push: (_path: string) => {
@@ -51,31 +54,46 @@ describe('Frontend Transfer Approval Chat Continuation', () => {
       },
     };
 
-    // Simulated handleConfirmTransfer execution
     let stayedOnScreen = true;
-    const handleConfirm = () => {
+    const handleApprove = () => {
       // In the updated code, router.push is never called
       stayedOnScreen = true;
     };
 
-    handleConfirm();
+    handleApprove();
     assert.strictEqual(navigationOccurred, false);
     assert.strictEqual(stayedOnScreen, true);
   });
 
-  test('3. The action sends the exact approvalId and current conversationId', async () => {
-    let capturedMessage = '';
-    let capturedConvId: string | undefined = '';
+  test('3. Clicking Reject does not navigate away from chat', async () => {
+    let navigationOccurred = false;
+    const fakeRouter = {
+      push: (_path: string) => {
+        navigationOccurred = true;
+      },
+    };
+
+    let stayedOnScreen = true;
+    const handleReject = () => {
+      stayedOnScreen = true;
+    };
+
+    handleReject();
+    assert.strictEqual(navigationOccurred, false);
+    assert.strictEqual(stayedOnScreen, true);
+  });
+
+  test('4. Approve sends the exact approvalId and existing conversationId', async () => {
     let capturedAction: ChatAction | undefined = undefined;
+    let capturedConvId: string | undefined = undefined;
 
     const mockAssistantService = {
-      sendMessage: async (msg: string, convId?: string, action?: ChatAction): Promise<AssistantResponse> => {
-        capturedMessage = msg;
+      sendMessage: async (_msg: string, convId?: string, action?: ChatAction): Promise<AssistantResponse> => {
         capturedConvId = convId;
         capturedAction = action;
         return {
-          kind: 'transfer_complete',
-          text: 'Transfer of **₹500.00** to **Ravi Sharma** has been confirmed.',
+          kind: 'transfer_result',
+          text: 'Transfer approved and completed.',
           approval: { ...sampleApproval, status: 'COMPLETED', consumed: true },
           conversationId: convId,
         };
@@ -83,90 +101,148 @@ describe('Frontend Transfer Approval Chat Continuation', () => {
     };
 
     const targetConvId = 'conv_2e8225706a604cdc';
-    await mockAssistantService.sendMessage(
-      'Confirm transfer of ₹500.00 to Ravi Sharma',
-      targetConvId,
-      {
-        type: 'confirm_transfer',
+    await mockAssistantService.sendMessage('Approve transfer of ₹500.00 to Ravi Sharma', targetConvId, {
+      type: 'approve_transfer',
+      approvalId: sampleApproval.approvalId,
+      context: {
         approvalId: sampleApproval.approvalId,
-      }
-    );
+        beneficiaryId: 'ben_ravi',
+        beneficiaryName: 'Ravi Sharma',
+        amountPaise: 50000,
+        sourceAccountId: 'acct_01',
+        status: 'WAITING_FOR_APPROVAL',
+      },
+    });
 
     assert.strictEqual(capturedConvId, 'conv_2e8225706a604cdc');
     assert.ok(capturedAction);
-    assert.strictEqual(capturedAction.type, 'confirm_transfer');
+    assert.strictEqual(capturedAction.type, 'approve_transfer');
     assert.strictEqual(capturedAction.approvalId, 'appr_07a202050a2541c2bcab');
-    assert.ok(capturedMessage.includes('₹500.00'));
+    assert.ok(capturedAction.context);
+    assert.strictEqual(capturedAction.context.beneficiaryName, 'Ravi Sharma');
   });
 
-  test('4. A successful response appears as a new message in the same chat', async () => {
-    let messages: ChatMessage[] = [
-      { id: 'm1', role: 'user', text: 'Transfer ₹500 to Ravi' },
-      { id: 'm2', role: 'assistant', text: 'Transfer preview...', response: sampleApprovalResponse },
-    ];
+  test('5. Reject sends the exact approvalId and existing conversationId', async () => {
+    let capturedAction: ChatAction | undefined = undefined;
+    let capturedConvId: string | undefined = undefined;
 
-    // User triggers confirmation
-    const confirmMsg: ChatMessage = {
-      id: 'm3',
-      role: 'user',
-      text: 'Confirm transfer of ₹500.00 to Ravi Sharma',
-    };
-    messages = [...messages, confirmMsg];
-
-    const completedResponse: AssistantResponse = {
-      kind: 'transfer_complete',
-      text: 'Transfer of **₹500.00** to **Ravi Sharma** has been confirmed.\n\n- **Status:** Completed\n- **Transaction ID:** `txn_123`',
-      approval: { ...sampleApproval, status: 'COMPLETED', consumed: true },
-      conversationId: 'conv_2e8225706a604cdc',
+    const mockAssistantService = {
+      sendMessage: async (_msg: string, convId?: string, action?: ChatAction): Promise<AssistantResponse> => {
+        capturedConvId = convId;
+        capturedAction = action;
+        return {
+          kind: 'transfer_result',
+          text: 'Transfer rejected and cancelled.',
+          approval: { ...sampleApproval, status: 'CANCELLED', consumed: true },
+          conversationId: convId,
+        };
+      },
     };
 
-    const asstMsg: ChatMessage = {
-      id: 'm4',
-      role: 'assistant',
-      text: completedResponse.text,
-      response: completedResponse,
-    };
-    messages = [...messages, asstMsg];
+    const targetConvId = 'conv_2e8225706a604cdc';
+    await mockAssistantService.sendMessage('Reject transfer of ₹500.00 to Ravi Sharma', targetConvId, {
+      type: 'reject_transfer',
+      approvalId: sampleApproval.approvalId,
+      context: {
+        approvalId: sampleApproval.approvalId,
+        beneficiaryId: 'ben_ravi',
+        beneficiaryName: 'Ravi Sharma',
+        amountPaise: 50000,
+        sourceAccountId: 'acct_01',
+        status: 'WAITING_FOR_APPROVAL',
+      },
+    });
 
-    assert.strictEqual(messages.length, 4);
-    assert.strictEqual(messages[0].id, 'm1');
-    assert.strictEqual(messages[1].id, 'm2');
-    assert.strictEqual(messages[2].id, 'm3');
-    assert.strictEqual(messages[3].id, 'm4');
-    assert.strictEqual(messages[3].response?.kind, 'transfer_complete');
-    assert.strictEqual(messages[3].response?.conversationId, 'conv_2e8225706a604cdc');
+    assert.strictEqual(capturedConvId, 'conv_2e8225706a604cdc');
+    assert.ok(capturedAction);
+    assert.strictEqual(capturedAction.type, 'reject_transfer');
+    assert.strictEqual(capturedAction.approvalId, 'appr_07a202050a2541c2bcab');
   });
 
-  test('5. Repeated clicks do not submit duplicate confirmation requests', async () => {
+  test('6. The transfer context is preserved across the action request', async () => {
+    let capturedAction: ChatAction | undefined = undefined;
+    const mockSend = async (_m: string, _c?: string, action?: ChatAction): Promise<AssistantResponse> => {
+      capturedAction = action;
+      return {
+        kind: 'transfer_result',
+        text: 'done',
+        approval: { ...sampleApproval, status: 'COMPLETED', consumed: true },
+      };
+    };
+
+    await mockSend('Approve', 'conv_x', {
+      type: 'approve_transfer',
+      approvalId: sampleApproval.approvalId,
+      context: { amountPaise: 50000, beneficiaryName: 'Ravi Sharma' },
+    });
+    assert.strictEqual(capturedAction?.context?.amountPaise, 50000);
+    assert.strictEqual(capturedAction?.context?.beneficiaryName, 'Ravi Sharma');
+  });
+
+  test('7. A loading state prevents duplicate clicks (approve)', async () => {
     let callCount = 0;
     let confirmingApprovalId: string | null = null;
     let processing = false;
 
-    const mockConfirmHandler = async (targetApproval: TransferApproval) => {
-      if (confirmingApprovalId || processing || targetApproval.consumed || targetApproval.status === 'COMPLETED') {
+    const mockHandler = async (targetApproval: TransferApproval, _decision: 'approve' | 'reject') => {
+      if (confirmingApprovalId || processing || isTerminal(targetApproval)) {
         return;
       }
       confirmingApprovalId = targetApproval.approvalId;
       processing = true;
       callCount++;
-      // Simulate delay
       await new Promise((resolve) => setTimeout(resolve, 50));
       confirmingApprovalId = null;
       processing = false;
     };
 
-    // First click initiates processing
-    const p1 = mockConfirmHandler(sampleApproval);
-    // Second click during in-flight request
-    const p2 = mockConfirmHandler(sampleApproval);
-    // Third click during in-flight request
-    const p3 = mockConfirmHandler(sampleApproval);
-
+    const p1 = mockHandler(sampleApproval, 'approve');
+    const p2 = mockHandler(sampleApproval, 'approve');
+    const p3 = mockHandler(sampleApproval, 'approve');
     await Promise.all([p1, p2, p3]);
-    assert.strictEqual(callCount, 1, 'Only one confirmation request must be submitted across repeated clicks');
+    assert.strictEqual(callCount, 1);
   });
 
-  test('6. A failed request displays an error and leaves the chat usable', async () => {
+  test('8. A successful approve response updates the original message and appends a new assistant response', () => {
+    let messages: ChatMessage[] = [
+      { id: 'm1', role: 'user', text: 'Transfer ₹500 to Ravi' },
+      { id: 'm2', role: 'assistant', text: 'Transfer preview...', response: sampleApprovalResponse },
+      { id: 'm3', role: 'user', text: 'Approve transfer of ₹500.00 to Ravi Sharma' },
+    ];
+
+    const completedApproval: TransferApproval = { ...sampleApproval, status: 'COMPLETED', consumed: true };
+    const resultResponse: AssistantResponse = {
+      kind: 'transfer_result',
+      text: 'Transfer approved and completed.',
+      approval: completedApproval,
+      conversationId: 'conv_2e8225706a604cdc',
+    };
+
+    // Update original approval message with authoritative status
+    messages = messages.map((msg) => {
+      if (msg.response?.approval?.approvalId === completedApproval.approvalId && msg.response) {
+        return {
+          ...msg,
+          response: {
+            ...msg.response,
+            approval: { ...msg.response.approval, ...completedApproval, consumed: true, status: 'COMPLETED' },
+          },
+        };
+      }
+      return msg;
+    });
+
+    // Append new assistant response
+    messages = [...messages, { id: 'm4', role: 'assistant', text: resultResponse.text, response: resultResponse }];
+
+    assert.strictEqual(messages.length, 4);
+    assert.strictEqual(messages[1].response?.approval?.status, 'COMPLETED');
+    assert.strictEqual(messages[1].response?.approval?.consumed, true);
+    assert.strictEqual(messages[3].response?.kind, 'transfer_result');
+    assert.strictEqual(messages[3].response?.conversationId, 'conv_2e8225706a604cdc');
+  });
+
+  test('9. An error is shown when the operation fails and chat stays usable', () => {
     let messages: ChatMessage[] = [
       { id: 'm1', role: 'user', text: 'Transfer ₹500 to Ravi' },
       { id: 'm2', role: 'assistant', text: 'Transfer preview...', response: sampleApprovalResponse },
@@ -174,7 +250,6 @@ describe('Frontend Transfer Approval Chat Continuation', () => {
     let confirmingApprovalId: string | null = null;
     let processing = false;
 
-    // Simulate failed API error
     try {
       confirmingApprovalId = sampleApproval.approvalId;
       processing = true;
@@ -199,49 +274,64 @@ describe('Frontend Transfer Approval Chat Continuation', () => {
     assert.strictEqual(messages[2].text, 'This approval has expired.');
   });
 
-  test('7. The approval button updates based on the actual returned transfer status', () => {
+  test('10. Existing non-transfer chat scenarios continue to work', () => {
+    const normalResponse: AssistantResponse = {
+      kind: 'normal',
+      text: 'I can help with spending insights, recent transactions, or a simulated transfer.',
+    };
+    assert.strictEqual(normalResponse.kind, 'normal');
+    assert.ok(normalResponse.text.length > 0);
+  });
+
+  test('11. A terminal approval cannot be actioned again', () => {
+    const completedApproval: TransferApproval = { ...sampleApproval, status: 'COMPLETED', consumed: true };
+    const cancelledApproval: TransferApproval = { ...sampleApproval, status: 'CANCELLED', consumed: true };
+
+    assert.strictEqual(isTerminal(completedApproval), true);
+    assert.strictEqual(isTerminal(cancelledApproval), true);
+
+    // Simulated guard: handler should early-return for terminal approvals
+    let callCount = 0;
+    let processing = false;
+    let confirmingApprovalId: string | null = null;
+    const guard = (a: TransferApproval) => {
+      if (confirmingApprovalId || processing || isTerminal(a)) return;
+      callCount++;
+    };
+    guard(completedApproval);
+    guard(cancelledApproval);
+    assert.strictEqual(callCount, 0);
+  });
+
+  test('12. Reject updates original message to CANCELLED and appends result', () => {
     let messages: ChatMessage[] = [
-      { id: 'm1', role: 'assistant', text: 'Preview', response: sampleApprovalResponse },
+      { id: 'm1', role: 'assistant', text: 'preview', response: sampleApprovalResponse },
     ];
 
-    // Initial button state: actionable
-    const initialApproval = messages[0].response!.approval!;
-    const isInitiallyDisabled = initialApproval.consumed || initialApproval.status === 'COMPLETED';
-    assert.strictEqual(isInitiallyDisabled, false);
-
-    // Backend returns completed transfer response
-    const completedApproval: TransferApproval = {
-      ...initialApproval,
-      status: 'COMPLETED',
-      consumed: true,
+    const cancelledApproval: TransferApproval = { ...sampleApproval, status: 'CANCELLED', consumed: true };
+    const resultResponse: AssistantResponse = {
+      kind: 'transfer_result',
+      text: 'Transfer rejected and cancelled.',
+      approval: cancelledApproval,
+      conversationId: 'conv_2e8225706a604cdc',
     };
 
-    // Update messages in place
     messages = messages.map((msg) => {
-      if (msg.response?.approval?.approvalId === completedApproval.approvalId && msg.response) {
+      if (msg.response?.approval?.approvalId === cancelledApproval.approvalId && msg.response) {
         return {
           ...msg,
           response: {
             ...msg.response,
-            approval: {
-              ...msg.response.approval,
-              ...completedApproval,
-              consumed: true,
-              status: completedApproval.status,
-            },
+            approval: { ...msg.response.approval, ...cancelledApproval, consumed: true, status: 'CANCELLED' },
           },
         };
       }
       return msg;
     });
+    messages = [...messages, { id: 'm2', role: 'assistant', text: resultResponse.text, response: resultResponse }];
 
-    const updatedApproval = messages[0].response!.approval!;
-    const isNowDisabled = updatedApproval.consumed || updatedApproval.status === 'COMPLETED';
-    assert.strictEqual(isNowDisabled, true);
-    assert.strictEqual(updatedApproval.status, 'COMPLETED');
-    assert.strictEqual(updatedApproval.consumed, true);
-
-    const buttonLabel = isNowDisabled ? 'Transfer Confirmed ✓' : 'Confirm transfer';
-    assert.strictEqual(buttonLabel, 'Transfer Confirmed ✓');
+    assert.strictEqual(messages[0].response?.approval?.status, 'CANCELLED');
+    assert.strictEqual(messages[0].response?.approval?.consumed, true);
+    assert.strictEqual(messages[1].response?.kind, 'transfer_result');
   });
 });

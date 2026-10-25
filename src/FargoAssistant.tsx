@@ -19,7 +19,6 @@ import { router } from 'expo-router';
 import {
   ArrowLeft,
   ArrowUp,
-  ChevronRight,
   CreditCard,
   Mic,
   MicOff,
@@ -55,6 +54,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
   const [voiceModeStatus, setVoiceModeStatus] = useState<'listening' | 'thinking' | 'speaking'>('listening');
   const [voiceModeTranscript, setVoiceModeTranscript] = useState('');
   const [confirmingApprovalId, setConfirmingApprovalId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<'approve' | 'reject' | null>(null);
 
   const scroll = useRef<any>(null);
   const { setApproval } = useApp();
@@ -195,19 +195,34 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
     }
   };
 
-  // Handle in-chat transfer confirmation without navigating away
-  const handleConfirmTransfer = async (targetApproval: TransferApproval) => {
-    if (confirmingApprovalId || processing || targetApproval.consumed || targetApproval.status === 'COMPLETED') {
+  // Handle in-chat transfer approve/reject without navigating away.
+  // The backend re-validates ownership, status, and expiry from the
+  // authoritative approval record; the client context is informational only.
+  const handleApprovalDecision = async (
+    targetApproval: TransferApproval,
+    decision: 'approve' | 'reject',
+  ) => {
+    if (
+      confirmingApprovalId ||
+      processing ||
+      targetApproval.consumed ||
+      targetApproval.status === 'COMPLETED' ||
+      targetApproval.status === 'CANCELLED' ||
+      targetApproval.status === 'REJECTED' ||
+      targetApproval.status === 'EXPIRED' ||
+      targetApproval.status === 'FAILED'
+    ) {
       return;
     }
     setConfirmingApprovalId(targetApproval.approvalId);
+    setPendingAction(decision);
     setProcessing(true);
     setLastError(null);
 
     const amountFormatted = `₹${(targetApproval.amountPaise / 100).toFixed(2)}`;
-    const confirmMessage = `Confirm transfer of ${amountFormatted} to ${targetApproval.beneficiary.fullName}`;
+    const actionLabel = decision === 'approve' ? 'Approve' : 'Reject';
+    const confirmMessage = `${actionLabel} transfer of ${amountFormatted} to ${targetApproval.beneficiary.fullName}`;
 
-    // Add user confirmation message into current conversation
     setMessages((current) => [
       ...current,
       { id: `u_${Date.now()}`, role: 'user', text: confirmMessage },
@@ -219,16 +234,24 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
         confirmMessage,
         conversationId,
         {
-          type: 'confirm_transfer',
+          type: decision === 'approve' ? 'approve_transfer' : 'reject_transfer',
           approvalId: targetApproval.approvalId,
-        }
+          context: {
+            approvalId: targetApproval.approvalId,
+            beneficiaryId: targetApproval.beneficiary.id,
+            beneficiaryName: targetApproval.beneficiary.fullName,
+            amountPaise: targetApproval.amountPaise,
+            sourceAccountId: targetApproval.sourceAccountId,
+            status: targetApproval.status,
+          },
+        },
       );
 
       if (response.conversationId) {
         setConversationId(response.conversationId);
       }
 
-      // Mark the original approval as completed and consumed in the messages list
+      // Update the original approval message with the authoritative final status.
       setMessages((current) =>
         current.map((msg): ChatMessage => {
           if (msg.response?.approval?.approvalId === targetApproval.approvalId && msg.response) {
@@ -240,13 +263,14 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
                   ...msg.response.approval,
                   ...(response.approval || {}),
                   consumed: true,
-                  status: (response.approval?.status || 'COMPLETED') as ApprovalStatus,
+                  status: (response.approval?.status ||
+                    (decision === 'approve' ? 'COMPLETED' : 'CANCELLED')) as ApprovalStatus,
                 },
               },
             };
           }
           return msg;
-        })
+        }),
       );
 
       if (response.approval) {
@@ -262,7 +286,6 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
       setMessages((current) => [...current, assistantMessage]);
       setTimeout(() => scrollToBottom(true), 60);
 
-      // If in Voice Mode, speak response aloud
       if (voiceModeOpen || isListening) {
         setVoiceModeStatus('speaking');
         setVoiceModeTranscript(response.text);
@@ -271,7 +294,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
     } catch (err) {
       const friendly = isApiError(err)
         ? err.message
-        : 'I could not confirm the transfer right now. Please try again.';
+        : `I could not ${decision} the transfer right now. Please try again.`;
       setLastError(friendly);
       setMessages((current) => [
         ...current,
@@ -284,6 +307,7 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
       ]);
     } finally {
       setConfirmingApprovalId(null);
+      setPendingAction(null);
       setProcessing(false);
       setTimeout(() => scrollToBottom(true), 80);
       setTimeout(() => scrollToBottom(true), 250);
@@ -606,33 +630,108 @@ export function FargoAssistant({ onClose, isModal = false }: FargoAssistantProps
                           ₹0.00 (Free)
                         </Text>
                       </View>
+                      <View style={styles.transferRow}>
+                        <Text style={styles.transferRowLabel}>Status:</Text>
+                        <Text
+                          style={[
+                            styles.transferRowVal,
+                            approval.status === 'COMPLETED' && { color: '#059669' },
+                            (approval.status === 'CANCELLED' ||
+                              approval.status === 'REJECTED' ||
+                              approval.status === 'EXPIRED' ||
+                              approval.status === 'FAILED') && { color: '#B91C1C' },
+                          ]}
+                        >
+                          {approval.status === 'WAITING_FOR_APPROVAL'
+                            ? 'Waiting for approval'
+                            : approval.status === 'COMPLETED'
+                            ? 'Completed'
+                            : approval.status === 'CANCELLED'
+                            ? 'Cancelled'
+                            : approval.status === 'REJECTED'
+                            ? 'Rejected'
+                            : approval.status === 'EXPIRED'
+                            ? 'Expired'
+                            : approval.status === 'FAILED'
+                            ? 'Failed'
+                            : approval.status}
+                        </Text>
+                      </View>
                     </View>
 
-                    <Pressable
-                      testID={`confirm-transfer-btn-${approval.approvalId}`}
-                      disabled={confirmingApprovalId === approval.approvalId || processing || approval.consumed || approval.status === 'COMPLETED'}
-                      style={[
-                        styles.authorizeTransferBtn,
-                        (confirmingApprovalId === approval.approvalId || approval.consumed || approval.status === 'COMPLETED') && styles.authorizeBtnDisabled,
-                      ]}
-                      onPress={() => void handleConfirmTransfer(approval)}
-                    >
-                      {confirmingApprovalId === approval.approvalId ? (
-                        <View style={styles.btnLoadingRow}>
-                          <ActivityIndicator size="small" color="#FFFFFF" />
-                          <Text style={styles.authorizeBtnText}>Processing confirmation…</Text>
+                    {(() => {
+                      const isTerminal =
+                        approval.consumed ||
+                        approval.status === 'COMPLETED' ||
+                        approval.status === 'CANCELLED' ||
+                        approval.status === 'REJECTED' ||
+                        approval.status === 'EXPIRED' ||
+                        approval.status === 'FAILED';
+                      const isBusy =
+                        confirmingApprovalId === approval.approvalId || processing;
+
+                      if (isTerminal) {
+                        const label =
+                          approval.status === 'COMPLETED'
+                            ? 'Transfer Confirmed ✓'
+                            : approval.status === 'CANCELLED'
+                            ? 'Transfer Cancelled'
+                            : approval.status === 'REJECTED'
+                            ? 'Transfer Rejected'
+                            : approval.status === 'EXPIRED'
+                            ? 'Approval Expired'
+                            : approval.status === 'FAILED'
+                            ? 'Transfer Failed'
+                            : 'Transfer Finalized';
+                        return (
+                          <View style={[styles.authorizeTransferBtn, styles.authorizeBtnDisabled]}>
+                            <Text style={styles.authorizeBtnText}>{label}</Text>
+                          </View>
+                        );
+                      }
+
+                      return (
+                        <View style={styles.approvalActionsRow}>
+                          <Pressable
+                            testID={`approve-transfer-btn-${approval.approvalId}`}
+                            disabled={isBusy}
+                            style={[
+                              styles.approveBtn,
+                              isBusy && styles.authorizeBtnDisabled,
+                            ]}
+                            onPress={() => void handleApprovalDecision(approval, 'approve')}
+                          >
+                            {confirmingApprovalId === approval.approvalId && pendingAction === 'approve' ? (
+                              <View style={styles.btnLoadingRow}>
+                                <ActivityIndicator size="small" color="#FFFFFF" />
+                                <Text style={styles.authorizeBtnText}>Approving…</Text>
+                              </View>
+                            ) : (
+                              <Text style={styles.authorizeBtnText}>Approve</Text>
+                            )}
+                          </Pressable>
+
+                          <Pressable
+                            testID={`reject-transfer-btn-${approval.approvalId}`}
+                            disabled={isBusy}
+                            style={[
+                              styles.rejectBtn,
+                              isBusy && styles.authorizeBtnDisabled,
+                            ]}
+                            onPress={() => void handleApprovalDecision(approval, 'reject')}
+                          >
+                            {confirmingApprovalId === approval.approvalId && pendingAction === 'reject' ? (
+                              <View style={styles.btnLoadingRow}>
+                                <ActivityIndicator size="small" color="#FFFFFF" />
+                                <Text style={styles.authorizeBtnText}>Rejecting…</Text>
+                              </View>
+                            ) : (
+                              <Text style={styles.authorizeBtnText}>Reject</Text>
+                            )}
+                          </Pressable>
                         </View>
-                      ) : approval.consumed || approval.status === 'COMPLETED' ? (
-                        <View style={styles.btnLoadingRow}>
-                          <Text style={styles.authorizeBtnText}>Transfer Confirmed ✓</Text>
-                        </View>
-                      ) : (
-                        <View style={styles.btnLoadingRow}>
-                          <Text style={styles.authorizeBtnText}>Confirm transfer</Text>
-                          <ChevronRight size={16} color="#FFFFFF" />
-                        </View>
-                      )}
-                    </Pressable>
+                      );
+                    })()}
                   </View>
                 )}
 
@@ -1112,6 +1211,31 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 10,
     marginTop: 4,
+  },
+  approvalActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  approveBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: '#059669',
+  },
+  rejectBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: '#B91C1C',
   },
   authorizeBtnDisabled: {
     backgroundColor: '#9CA3AF',
